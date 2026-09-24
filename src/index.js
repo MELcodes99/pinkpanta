@@ -31,3 +31,4 @@ process.once('SIGINT', () => {
   bot.stop('SIGINT');
   process.exit(0);
 });
+
