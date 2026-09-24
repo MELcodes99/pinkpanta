@@ -1,4 +1,5 @@
 require('dotenv').config();
+const http = require('http');
 const { Telegraf } = require('telegraf');
 const { initializeDb } = require('./db/schema');
 const { getOrCreateUser } = require('./db/queries');
@@ -6,6 +7,7 @@ const { db } = require('./db/schema');
 const { generateUserKeypair, encryptKeypair, getUserBalance } = require('./solana/wallet');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
+const PORT = process.env.PORT || 3000;
 const bot = new Telegraf(token);
 
 initializeDb();
@@ -39,8 +41,22 @@ bot.command('start', async (ctx) => {
 
 bot.catch((err) => console.error('BOT ERROR:', err));
 
+// Dummy HTTP server for Render
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('PinkPanta Bot Running');
+});
+
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
+
 console.log('Starting bot...');
 bot.startPolling();
 console.log('Bot running!');
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGINT', () => {
+  bot.stop('SIGINT');
+  server.close();
+  process.exit(0);
+});
