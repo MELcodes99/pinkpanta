@@ -1,29 +1,31 @@
 require('dotenv').config();
+const { Telegraf } = require('telegraf');
 const { initializeDb } = require('./db/schema');
-const { bot } = require('./telegram/bot');
-const { registerCommands } = require('./telegram/commands');
 
-console.log('Starting PinkPanta bot...');
+const token = process.env.TELEGRAM_BOT_TOKEN;
+console.log('Token exists:', !!token);
+
+const bot = new Telegraf(token);
 
 initializeDb();
-console.log('✓ Database initialized');
 
-registerCommands(bot);
-console.log('✓ Commands registered');
-
-console.log('Starting polling...');
-
-bot.startPolling();
-console.log('✓ Bot is polling for messages!');
-console.log('Send /start to your bot now');
-
-// Catch any errors
-bot.catch((err) => {
-  console.error('Bot error:', err);
+// Simple test
+bot.start((ctx) => {
+  console.log('START HANDLER FIRED');
+  ctx.reply('Hello! Bot working!');
 });
 
+bot.on('text', (ctx) => {
+  console.log('TEXT received:', ctx.message.text);
+});
+
+bot.catch((err) => console.error('ERROR:', err));
+
+console.log('Starting polling...');
+bot.startPolling();
+console.log('Bot is running!');
+
 process.once('SIGINT', () => {
-  console.log('\nShutting down...');
   bot.stop('SIGINT');
   process.exit(0);
 });
