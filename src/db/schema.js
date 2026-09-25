@@ -15,6 +15,7 @@ function initializeDb() {
       telegram_id INTEGER UNIQUE NOT NULL,
       username TEXT,
       wallet_address TEXT,
+      encrypted_keypair TEXT,
       usdc_balance TEXT DEFAULT '0',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
