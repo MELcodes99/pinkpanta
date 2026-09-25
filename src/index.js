@@ -1,59 +1,26 @@
 require('dotenv').config();
 const http = require('http');
 const { Telegraf } = require('telegraf');
-const { initializeDb } = require('./db/schema');
-const { getOrCreateUser } = require('./db/queries');
-const { db } = require('./db/schema');
-const { generateUserKeypair, encryptKeypair, getUserBalance } = require('./solana/wallet');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 const bot = new Telegraf(token);
 
-initializeDb();
-
 bot.command('start', async (ctx) => {
-  try {
-    console.log('START command');
-    const telegramId = ctx.from.id;
-    const username = ctx.from.username || ctx.from.first_name;
-
-    let user = getOrCreateUser(telegramId, username);
-
-    if (!user.wallet_address) {
-      const keypair = generateUserKeypair();
-      const encrypted = encryptKeypair(keypair);
-      const walletAddress = keypair.publicKey.toString();
-
-      db.prepare(`UPDATE users SET wallet_address = ?, encrypted_keypair = ? WHERE id = ?`).run(walletAddress, encrypted, user.id);
-
-      await ctx.reply(`Wallet: ${walletAddress}`);
-      return;
-    }
-
-    const balance = await getUserBalance(user.wallet_address);
-    await ctx.reply(`Balance: ${balance.toFixed(4)} SOL`);
-  } catch (error) {
-    console.error('ERROR:', error);
-    await ctx.reply('Error: ' + error.message);
-  }
+  await ctx.reply('Hello! Your wallet: ABC123XYZ');
 });
 
-bot.catch((err) => console.error('BOT ERROR:', err));
+bot.catch((err) => console.error('ERROR:', err));
 
-// Dummy HTTP server for Render
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('PinkPanta Bot Running');
+  res.end('Running');
 });
 
-server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Listening on ${PORT}`));
 
-console.log('Starting bot...');
 bot.startPolling();
-console.log('Bot running!');
+console.log('Bot started');
 
 process.once('SIGINT', () => {
   bot.stop('SIGINT');
