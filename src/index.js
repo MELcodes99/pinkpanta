@@ -222,8 +222,21 @@ bot.action('copy_address', async (ctx) => {
       await ctx.answerCbQuery('Wallet not found', true);
       return;
     }
+
+    const message = `📋 Your Wallet Address:\n\n\`${user.wallet_address}\`\n\nTap and hold to copy, then paste anywhere!`;
     
-    await ctx.answerCbQuery(`✅ Copied: ${user.wallet_address}`, false);
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }],
+      ]
+    };
+
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+    
+    await ctx.answerCbQuery('Address displayed - tap and hold to copy');
   } catch (err) {
     console.error('ERROR copying address:', err.message);
     await ctx.answerCbQuery('Error', true);
