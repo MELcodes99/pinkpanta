@@ -1,8 +1,9 @@
 require('dotenv').config();
 const http = require('http');
 const { Telegraf } = require('telegraf');
+const bs58 = require('bs58');
 const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance } = require('./solana/wallet');
-const { getOrCreateUser, getUser, updateUserWallet, createMarket, getUserMarkets } = require('./db/queries');
+const { getOrCreateUser, getUser, updateUserWallet, createMarket, getUserMarkets, getUserPositions } = require('./db/queries');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -14,7 +15,7 @@ if (!token) {
 
 const bot = new Telegraf(token);
 
-// Store temporary state for button interactions (wallets in progress, etc)
+// Store temporary state for button interactions
 const userState = {};
 
 // ============= /START COMMAND =============
@@ -23,15 +24,17 @@ bot.command('start', async (ctx) => {
     const userId = ctx.from.id;
     const username = ctx.from.username || ctx.from.first_name || 'User';
     
-    // Get or create user in database
     await getOrCreateUser(userId, username);
+    
+    // Check if user already has wallet
+    const user = await getUser(userId);
+    const hasWallet = user && user.wallet_address;
     
     const greeting = `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Community Prediction Markets, powered by Panta, live on Solana.`;
     
-    // Inline keyboard with buttons
     const keyboard = {
       inline_keyboard: [
-        [{ text: '💰 Create Wallet', callback_data: 'btn_create_wallet' }],
+        [{ text: hasWallet ? '💰 View Wallet' : '💰 Create Wallet', callback_data: hasWallet ? 'btn_view_wallet' : 'btn_create_wallet' }],
         [{ text: '📊 Markets', callback_data: 'btn_markets' }],
         [{ text: '📈 My Positions', callback_data: 'btn_positions' }],
       ]
@@ -45,9 +48,7 @@ bot.command('start', async (ctx) => {
   }
 });
 
-// ============= BUTTON CALLBACKS =============
-
-// CREATE WALLET BUTTON
+// ============= CREATE WALLET BUTTON =============
 bot.action('btn_create_wallet', async (ctx) => {
   try {
     const userId = ctx.from.id;
@@ -61,14 +62,16 @@ bot.action('btn_create_wallet', async (ctx) => {
     const encryptedKey = encryptKeypair(keypair);
     await updateUserWallet(userId, walletAddress, encryptedKey);
     
-    // Store private key in temp state (expires after reveal)
+    // Convert to base58 for display
+    const privateKeyBase58 = bs58.encode(keypair.secretKey);
+    
+    // Store in temp state
     userState[userId] = {
       wallet: walletAddress,
-      privateKeyRevealed: false,
-      privateKeyArray: keypair.secretKey // array of numbers
+      privateKeyBase58: privateKeyBase58,
+      privateKeyArray: keypair.secretKey
     };
     
-    const privateKeyString = '[' + keypair.secretKey.join(', ') + ']';
     const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
     
     const message = `🎉 Wallet Created!\n\n` +
@@ -96,7 +99,148 @@ bot.action('btn_create_wallet', async (ctx) => {
   }
 });
 
-// REVEAL PRIVATE KEY BUTTON
+// ============= VIEW WALLET BUTTON =============
+bot.action('btn_view_wallet', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    // Get user wallet info
+    const user = await getUser(userId);
+    if (!user || !user.wallet_address) {
+      await ctx.answerCbQuery('No wallet found. Create one first.', true);
+      return;
+    }
+    
+    const walletAddress = user.wallet_address;
+    
+    // TODO: Get these from Panta API or database
+    const balance = 0; // SOL balance
+    const totalBets = 0;
+    const totalWins = 0;
+    const totalLosses = 0;
+    const profitPercentage = 0;
+    const moneyInBets = 0;
+    const availableToWithdraw = 0;
+    
+    const message = `💰 Your Wallet\n\n` +
+      `📍 Address: \`${walletAddress}\`\n` +
+      `(tap above to copy)\n\n` +
+      `---\n` +
+      `💵 Balance: ${balance} SOL\n` +
+      `📊 Total Bets: ${totalBets}\n` +
+      `✅ Total Wins: ${totalWins}\n` +
+      `❌ Total Losses: ${totalLosses}\n` +
+      `📈 Profit/Loss: ${profitPercentage}%\n\n` +
+      `💸 In Active Bets: ${moneyInBets} USDC\n` +
+      `🏦 Available to Withdraw: ${availableToWithdraw} USDC`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '📋 Copy Address', callback_data: `btn_copy_wallet_${userId}` }],
+        [{ text: '🔐 View Private Key', callback_data: `btn_view_existing_pk_${userId}` }],
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+    console.log(`[${new Date().toISOString()}] Viewed wallet for user ${userId}`);
+  } catch (err) {
+    console.error('ERROR viewing wallet:', err.message);
+    await ctx.answerCbQuery('Error viewing wallet', true);
+  }
+});
+
+// ============= COPY WALLET ADDRESS =============
+bot.action(/btn_copy_wallet_(\d+)/, async (ctx) => {
+  try {
+    const userId = parseInt(ctx.match[1]);
+    const currentUserId = ctx.from.id;
+    
+    if (userId !== currentUserId) {
+      await ctx.answerCbQuery('Unauthorized', true);
+      return;
+    }
+    
+    const user = await getUser(userId);
+    if (!user || !user.wallet_address) {
+      await ctx.answerCbQuery('Wallet not found', true);
+      return;
+    }
+    
+    // Telegram shows a popup with the text
+    await ctx.answerCbQuery(`Copied: ${user.wallet_address}`, false);
+    
+    console.log(`[${new Date().toISOString()}] Wallet address copied for user ${userId}`);
+  } catch (err) {
+    console.error('ERROR copying wallet:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= VIEW EXISTING PRIVATE KEY (for users with existing wallet) =============
+bot.action(/btn_view_existing_pk_(\d+)/, async (ctx) => {
+  try {
+    const userId = parseInt(ctx.match[1]);
+    const currentUserId = ctx.from.id;
+    
+    if (userId !== currentUserId) {
+      await ctx.answerCbQuery('Unauthorized', true);
+      return;
+    }
+    
+    const user = await getUser(userId);
+    if (!user || !user.wallet_address || !user.encrypted_keypair) {
+      await ctx.answerCbQuery('Wallet not found', true);
+      return;
+    }
+    
+    try {
+      // Decrypt the stored keypair
+      const keypair = decryptKeypair(user.encrypted_keypair);
+      const privateKeyBase58 = bs58.encode(keypair.secretKey);
+      
+      // Store in temp state for this session
+      userState[userId] = {
+        wallet: user.wallet_address,
+        privateKeyBase58: privateKeyBase58,
+        privateKeyArray: keypair.secretKey
+      };
+      
+      const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+      
+      const message = `🔐 Your Private Key\n\n` +
+        `💳 Solana Wallet: \`${user.wallet_address}\`\n\n` +
+        `🔑 Private Key: \`${privateKeyHidden}\`\n\n` +
+        `⚠️ Do not share in chat or screenshots.`;
+      
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: '👁️ Tap to Reveal', callback_data: `btn_reveal_pk_${userId}` }],
+          [{ text: '⬅️ Back to Wallet', callback_data: 'btn_view_wallet' }],
+        ]
+      };
+      
+      await ctx.editMessageText(message, { 
+        parse_mode: 'Markdown',
+        reply_markup: keyboard 
+      });
+      
+      console.log(`[${new Date().toISOString()}] User ${userId} accessing private key`);
+    } catch (decryptErr) {
+      console.error('ERROR decrypting keypair:', decryptErr.message);
+      await ctx.answerCbQuery('Error accessing private key. Try creating a new wallet.', true);
+    }
+  } catch (err) {
+    console.error('ERROR viewing existing private key:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= REVEAL PRIVATE KEY BUTTON =============
 bot.action(/btn_reveal_pk_(\d+)/, async (ctx) => {
   try {
     const userId = parseInt(ctx.match[1]);
@@ -108,18 +252,17 @@ bot.action(/btn_reveal_pk_(\d+)/, async (ctx) => {
     }
     
     if (!userState[userId]) {
-      await ctx.answerCbQuery('Wallet not found. Create a new one.', true);
+      await ctx.answerCbQuery('Wallet not found. Refresh and try again.', true);
       return;
     }
     
     const walletAddress = userState[userId].wallet;
-    const privateKeyArray = userState[userId].privateKeyArray;
-    const privateKeyString = '[' + privateKeyArray.join(', ') + ']';
+    const privateKeyBase58 = userState[userId].privateKeyBase58;
     
     const message = `🎉 Wallet Details\n\n` +
-      `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
+      `💳 Solana Wallet:\n\`${walletAddress}\`\n\n` +
       `⚠️ Only send SPL tokens here.\n\n` +
-      `🔐 Private Key (REVEALED): \n\`\`\`\n${privateKeyString}\n\`\`\`\n\n` +
+      `🔐 Private Key (REVEALED):\n\`${privateKeyBase58}\`\n\n` +
       `⚠️ Import to your cold wallet and save securely. Do not share in chat or screenshots.`;
     
     const keyboard = {
@@ -142,7 +285,7 @@ bot.action(/btn_reveal_pk_(\d+)/, async (ctx) => {
   }
 });
 
-// HIDE PRIVATE KEY BUTTON
+// ============= HIDE PRIVATE KEY BUTTON =============
 bot.action(/btn_hide_pk_(\d+)/, async (ctx) => {
   try {
     const userId = parseInt(ctx.match[1]);
@@ -186,7 +329,7 @@ bot.action(/btn_hide_pk_(\d+)/, async (ctx) => {
   }
 });
 
-// MARKETS BUTTON
+// ============= MARKETS BUTTON =============
 bot.action('btn_markets', async (ctx) => {
   try {
     const keyboard = {
@@ -206,7 +349,7 @@ bot.action('btn_markets', async (ctx) => {
   }
 });
 
-// MY MARKETS
+// ============= MY MARKETS =============
 bot.action('btn_my_markets', async (ctx) => {
   try {
     const userId = ctx.from.id;
@@ -235,12 +378,9 @@ bot.action('btn_my_markets', async (ctx) => {
   }
 });
 
-// JOINED MARKETS
+// ============= JOINED MARKETS =============
 bot.action('btn_joined_markets', async (ctx) => {
   try {
-    const userId = ctx.from.id;
-    
-    // TODO: Implement joined markets logic
     const message = '🎯 Joined Markets:\n\nFeature coming soon!';
     
     const keyboard = {
@@ -256,10 +396,9 @@ bot.action('btn_joined_markets', async (ctx) => {
   }
 });
 
-// POSITIONS BUTTON
+// ============= POSITIONS BUTTON =============
 bot.action('btn_positions', async (ctx) => {
   try {
-    // TODO: Implement positions logic
     const message = '📈 Your Positions:\n\nFeature coming soon!';
     
     const keyboard = {
@@ -275,16 +414,21 @@ bot.action('btn_positions', async (ctx) => {
   }
 });
 
-// BACK TO START MENU
+// ============= BACK TO START MENU =============
 bot.action('btn_start_menu', async (ctx) => {
   try {
+    const userId = ctx.from.id;
     const username = ctx.from.username || ctx.from.first_name;
+    
+    // Check if user has wallet
+    const user = await getUser(userId);
+    const hasWallet = user && user.wallet_address;
     
     const greeting = `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Community Prediction Markets, powered by Panta, live on Solana.`;
     
     const keyboard = {
       inline_keyboard: [
-        [{ text: '💰 Create Wallet', callback_data: 'btn_create_wallet' }],
+        [{ text: hasWallet ? '💰 View Wallet' : '💰 Create Wallet', callback_data: hasWallet ? 'btn_view_wallet' : 'btn_create_wallet' }],
         [{ text: '📊 Markets', callback_data: 'btn_markets' }],
         [{ text: '📈 My Positions', callback_data: 'btn_positions' }],
       ]
