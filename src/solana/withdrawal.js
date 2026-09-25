@@ -14,6 +14,7 @@ const axios = require('axios');
 const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
 
 // Fetch token prices from CoinGecko with retries
 async function getTokenPrices() {
@@ -21,12 +22,14 @@ async function getTokenPrices() {
   
   while (retries > 0) {
     try {
-      const response = await axios.get(
-        'https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd',
-        { timeout: 5000 }
-      );
+      const url = COINGECKO_API_KEY
+        ? `https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd&x_cg_pro_api_key=${COINGECKO_API_KEY}`
+        : 'https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd';
+      
+      const response = await axios.get(url, { timeout: 5000 });
       
       if (response.data.solana && response.data['usd-coin']) {
+        console.log(`Prices fetched: SOL=$${response.data.solana.usd}, USDC=$${response.data['usd-coin'].usd}`);
         return {
           sol: response.data.solana.usd,
           usdc: response.data['usd-coin'].usd
