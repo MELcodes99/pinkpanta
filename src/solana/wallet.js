@@ -5,7 +5,7 @@ const bs58 = require('bs58');
 
 const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const connection = new Connection(SOLANA_RPC, 'confirmed');
-const USDC_MINT = 'EPjFWaLb3oqH4w8g5D6XaDMsKkynP41yDyhBP6SHo6K'; // Mainnet USDC
+const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
