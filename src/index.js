@@ -2,6 +2,7 @@ require('dotenv').config();
 const http = require('http');
 const { Telegraf } = require('telegraf');
 const bs58 = require('bs58');
+const { initializeDb } = require('./db/schema');
 const { runMigrations } = require('./db/migrations');
 const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance, getSolBalance, getUsdcBalance } = require('./solana/wallet');
 const { getOrCreateUser, getUser, updateUserWallet, deleteUserWallet, createMarket, getUserMarkets } = require('./db/queries');
@@ -404,6 +405,7 @@ bot.action('delete_wallet_confirm', async (ctx) => {
 bot.action('delete_wallet_ask_type', async (ctx) => {
   try {
     const userId = ctx.from.id;
+    userState[userId] = userState[userId] || {};
     userState[userId].deleteInProgress = true;
     
     const message = `Type the word "Delete" to confirm wallet deletion:`;
@@ -581,19 +583,31 @@ server.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] Listening on port ${PORT}`);
 });
 
-// ============= RUN MIGRATIONS AND START BOT =============
-runMigrations().then(() => {
-  console.log(`[${new Date().toISOString()}] Starting polling...`);
-  bot.startPolling().catch(err => {
-    console.error('POLLING ERROR:', err);
+// ============= INITIALIZE DB, RUN MIGRATIONS, AND START BOT =============
+async function startup() {
+  try {
+    console.log('Initializing database...');
+    await initializeDb();
+    console.log('Database initialized successfully');
+    
+    console.log('Running migrations...');
+    await runMigrations();
+    console.log('Migrations completed');
+    
+    console.log(`[${new Date().toISOString()}] Starting polling...`);
+    bot.startPolling().catch(err => {
+      console.error('POLLING ERROR:', err);
+      process.exit(1);
+    });
+    
+    console.log(`[${new Date().toISOString()}] Bot polling started!`);
+  } catch (err) {
+    console.error('Startup error:', err);
     process.exit(1);
-  });
-  
-  console.log(`[${new Date().toISOString()}] Bot polling started!`);
-}).catch(err => {
-  console.error('Migration error:', err);
-  process.exit(1);
-});
+  }
+}
+
+startup();
 
 // ============= GRACEFUL SHUTDOWN =============
 process.once('SIGINT', () => bot.stop('SIGINT'));
