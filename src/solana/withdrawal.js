@@ -15,19 +15,34 @@ const SOLANA_RPC = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solan
 const connection = new Connection(SOLANA_RPC, 'confirmed');
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
-// Fetch token prices from CoinGecko
+// Fetch token prices from CoinGecko with retries
 async function getTokenPrices() {
-  try {
-    const response = await axios.get(
-      'https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd'
-    );
-    return {
-      sol: response.data.solana.usd || 100,
-      usdc: response.data['usd-coin'].usd || 1
-    };
-  } catch (err) {
-    console.error('Error fetching prices:', err.message);
-    return { sol: 100, usdc: 1 };
+  let retries = 3;
+  
+  while (retries > 0) {
+    try {
+      const response = await axios.get(
+        'https://api.coingecko.com/api/v3/simple/price?ids=solana,usd-coin&vs_currencies=usd',
+        { timeout: 5000 }
+      );
+      
+      if (response.data.solana && response.data['usd-coin']) {
+        return {
+          sol: response.data.solana.usd,
+          usdc: response.data['usd-coin'].usd
+        };
+      }
+    } catch (err) {
+      retries--;
+      console.error(`Price fetch failed (retries left: ${retries})`, err.message);
+      
+      if (retries === 0) {
+        throw new Error('Failed to fetch live prices from CoinGecko after 3 retries');
+      }
+      
+      // Wait 1 second before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   }
 }
 
