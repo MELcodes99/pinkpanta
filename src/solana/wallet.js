@@ -1,4 +1,5 @@
 const { Keypair, Connection, PublicKey } = require('@solana/web3.js');
+const { TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const crypto = require('crypto');
 const bs58 = require('bs58');
 
@@ -12,7 +13,6 @@ if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 32) {
   process.exit(1);
 }
 
-// Derive a 32-byte key from the encryption key
 const encryptionKeyBuffer = Buffer.from(ENCRYPTION_KEY.slice(0, 32), 'utf8');
 
 // ============= KEY GENERATION & ENCRYPTION =============
@@ -31,7 +31,6 @@ function encryptKeypair(keypair) {
     let encrypted = cipher.update(plaintext, 'utf8', 'hex');
     encrypted += cipher.final('hex');
     
-    // Return: iv + encrypted (both hex)
     return iv.toString('hex') + ':' + encrypted;
   } catch (err) {
     console.error('ERROR encrypting keypair:', err.message);
@@ -68,12 +67,15 @@ function decryptKeypair(encryptedData) {
   }
 }
 
-// ============= BALANCE FETCHING =============
+// ============= LIVE BALANCE FETCHING =============
 async function getSolBalance(walletAddress) {
   try {
+    console.log(`Fetching SOL balance for: ${walletAddress}`);
     const publicKey = new PublicKey(walletAddress);
     const balanceLamports = await connection.getBalance(publicKey);
-    return balanceLamports / 1e9; // Convert to SOL
+    const solBalance = balanceLamports / 1e9;
+    console.log(`SOL Balance: ${solBalance}`);
+    return parseFloat(solBalance.toFixed(4));
   } catch (err) {
     console.error('ERROR fetching SOL balance:', err.message);
     return 0;
@@ -82,22 +84,30 @@ async function getSolBalance(walletAddress) {
 
 async function getUsdcBalance(walletAddress) {
   try {
+    console.log(`Fetching USDC balance for: ${walletAddress}`);
     const publicKey = new PublicKey(walletAddress);
     const usdcMint = new PublicKey(USDC_MINT);
     
     // Get all token accounts for this wallet
     const accounts = await connection.getParsedTokenAccountsByOwner(
       publicKey,
-      { mint: usdcMint }
+      { programId: TOKEN_PROGRAM_ID }
     );
     
-    if (accounts.value.length === 0) {
+    // Filter for USDC accounts
+    const usdcAccounts = accounts.value.filter(account => {
+      return account.account.data.parsed.info.mint === USDC_MINT;
+    });
+    
+    if (usdcAccounts.length === 0) {
+      console.log(`No USDC accounts found for ${walletAddress}`);
       return 0;
     }
     
-    // Get balance from first USDC account
-    const balance = accounts.value[0].account.data.parsed.info.tokenAmount.uiAmount;
-    return balance || 0;
+    // Get balance from USDC account
+    const balance = usdcAccounts[0].account.data.parsed.info.tokenAmount.uiAmount;
+    console.log(`USDC Balance: ${balance}`);
+    return parseFloat((balance || 0).toFixed(2));
   } catch (err) {
     console.error('ERROR fetching USDC balance:', err.message);
     return 0;
@@ -106,15 +116,23 @@ async function getUsdcBalance(walletAddress) {
 
 async function getUserBalance(walletAddress) {
   try {
-    const solBalance = await getSolBalance(walletAddress);
-    const usdcBalance = await getUsdcBalance(walletAddress);
+    console.log(`Fetching all balances for: ${walletAddress}`);
     
-    return {
-      sol: parseFloat(solBalance.toFixed(4)),
-      usdc: parseFloat(usdcBalance.toFixed(2))
-    };
+    const [sol, usdc] = await Promise.all([
+      getSolBalance(walletAddress).catch(err => {
+        console.error('SOL fetch failed:', err.message);
+        return 0;
+      }),
+      getUsdcBalance(walletAddress).catch(err => {
+        console.error('USDC fetch failed:', err.message);
+        return 0;
+      })
+    ]);
+    
+    console.log(`Final balances - SOL: ${sol}, USDC: ${usdc}`);
+    return { sol, usdc };
   } catch (err) {
-    console.error('ERROR getting user balance:', err.message);
+    console.error('ERROR in getUserBalance:', err.message);
     return { sol: 0, usdc: 0 };
   }
 }
