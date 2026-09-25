@@ -16,6 +16,12 @@ if (!token) {
 const bot = new Telegraf(token);
 const userState = {};
 
+// Helper to extract userId from callback data
+function extractUserId(callbackData) {
+  const match = callbackData.match(/_(\d+)$/);
+  return match ? parseInt(match[1]) : null;
+}
+
 // ============= /START COMMAND =============
 bot.command('start', async (ctx) => {
   try {
@@ -105,7 +111,23 @@ bot.action('btn_view_wallet', async (ctx) => {
     
     const walletAddress = user.wallet_address;
     
-    const { sol, usdc } = await getUserBalance(walletAddress);
+    // Fetch live balances with timeout
+    console.log(`Fetching balance for wallet: ${walletAddress}`);
+    let sol = 0;
+    let usdc = 0;
+    
+    try {
+      const balances = await Promise.race([
+        getUserBalance(walletAddress),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Balance fetch timeout')), 5000))
+      ]);
+      sol = balances.sol;
+      usdc = balances.usdc;
+    } catch (balanceErr) {
+      console.error('ERROR fetching balance:', balanceErr.message);
+      sol = 0;
+      usdc = 0;
+    }
     
     const totalBets = 0;
     const totalWins = 0;
@@ -146,72 +168,117 @@ bot.action('btn_view_wallet', async (ctx) => {
   }
 });
 
-// ============= COPY WALLET ADDRESS =============
-bot.action('btn_copy_wallet_', async (ctx) => {
-  try {
-    const match = ctx.match || ctx.callbackQuery.data.match(/btn_copy_wallet_(\d+)/);
-    const userId = match ? parseInt(match[1]) : ctx.from.id;
-    const currentUserId = ctx.from.id;
-    
-    if (userId !== currentUserId) {
-      await ctx.answerCbQuery('Unauthorized', true);
-      return;
-    }
-    
-    const user = await getUser(userId);
-    if (!user || !user.wallet_address) {
-      await ctx.answerCbQuery('Wallet not found', true);
-      return;
-    }
-    
-    await ctx.answerCbQuery(`Copied: ${user.wallet_address}`, false);
-    console.log(`[${new Date().toISOString()}] Wallet address copied for user ${userId}`);
-  } catch (err) {
-    console.error('ERROR copying wallet:', err.message);
-    await ctx.answerCbQuery('Error', true);
-  }
-});
-
-// ============= VIEW EXISTING PRIVATE KEY =============
-bot.action('btn_view_existing_pk_', async (ctx) => {
-  try {
-    const match = ctx.match || ctx.callbackQuery.data.match(/btn_view_existing_pk_(\d+)/);
-    const userId = match ? parseInt(match[1]) : ctx.from.id;
-    const currentUserId = ctx.from.id;
-    
-    if (userId !== currentUserId) {
-      await ctx.answerCbQuery('Unauthorized', true);
-      return;
-    }
-    
-    const user = await getUser(userId);
-    if (!user || !user.wallet_address || !user.encrypted_keypair) {
-      console.log(`User data:`, user);
-      await ctx.answerCbQuery('Wallet not found. Refresh and try again.', true);
-      return;
-    }
-    
+// ============= DYNAMIC CALLBACKS HANDLER =============
+bot.on('callback_query', async (ctx) => {
+  const data = ctx.callbackQuery.data;
+  const userId = ctx.from.id;
+  
+  // Handle copy wallet
+  if (data.startsWith('btn_copy_wallet_')) {
     try {
-      const keypair = decryptKeypair(user.encrypted_keypair);
-      const privateKeyBase58 = bs58.encode(keypair.secretKey);
+      const cbUserId = extractUserId(data);
+      if (cbUserId !== userId) {
+        await ctx.answerCbQuery('Unauthorized', true);
+        return;
+      }
       
-      userState[userId] = {
-        wallet: user.wallet_address,
-        privateKeyBase58: privateKeyBase58,
-        privateKeyArray: keypair.secretKey
-      };
+      const user = await getUser(userId);
+      if (!user || !user.wallet_address) {
+        await ctx.answerCbQuery('Wallet not found', true);
+        return;
+      }
       
-      const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+      await ctx.answerCbQuery(`Copied: ${user.wallet_address}`, false);
+      console.log(`[${new Date().toISOString()}] Wallet address copied for user ${userId}`);
+    } catch (err) {
+      console.error('ERROR copying wallet:', err.message);
+      await ctx.answerCbQuery('Error', true);
+    }
+  }
+  
+  // Handle view existing private key
+  else if (data.startsWith('btn_view_existing_pk_')) {
+    try {
+      const cbUserId = extractUserId(data);
+      if (cbUserId !== userId) {
+        await ctx.answerCbQuery('Unauthorized', true);
+        return;
+      }
       
-      const message = `🔐 Your Private Key\n\n` +
-        `💳 Solana Wallet: \`${user.wallet_address}\`\n\n` +
-        `🔑 Private Key: \`${privateKeyHidden}\`\n\n` +
-        `⚠️ Do not share in chat or screenshots.`;
+      const user = await getUser(userId);
+      if (!user || !user.wallet_address || !user.encrypted_keypair) {
+        console.log(`User data:`, user);
+        await ctx.answerCbQuery('Wallet not found. Create a new wallet.', true);
+        return;
+      }
+      
+      try {
+        const keypair = decryptKeypair(user.encrypted_keypair);
+        const privateKeyBase58 = bs58.encode(keypair.secretKey);
+        
+        userState[userId] = {
+          wallet: user.wallet_address,
+          privateKeyBase58: privateKeyBase58,
+          privateKeyArray: keypair.secretKey
+        };
+        
+        const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+        
+        const message = `🔐 Your Private Key\n\n` +
+          `💳 Solana Wallet: \`${user.wallet_address}\`\n\n` +
+          `🔑 Private Key: \`${privateKeyHidden}\`\n\n` +
+          `⚠️ Do not share in chat or screenshots.`;
+        
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: '👁️ Tap to Reveal', callback_data: `btn_reveal_pk_${userId}` }],
+            [{ text: '⬅️ Back to Wallet', callback_data: 'btn_view_wallet' }],
+          ]
+        };
+        
+        await ctx.editMessageText(message, { 
+          parse_mode: 'Markdown',
+          reply_markup: keyboard 
+        });
+        
+        console.log(`[${new Date().toISOString()}] User ${userId} accessing private key`);
+      } catch (decryptErr) {
+        console.error('ERROR decrypting keypair:', decryptErr.message);
+        await ctx.answerCbQuery('Error accessing private key. Try creating a new wallet.', true);
+      }
+    } catch (err) {
+      console.error('ERROR viewing existing private key:', err.message);
+      await ctx.answerCbQuery('Error', true);
+    }
+  }
+  
+  // Handle reveal private key
+  else if (data.startsWith('btn_reveal_pk_')) {
+    try {
+      const cbUserId = extractUserId(data);
+      if (cbUserId !== userId) {
+        await ctx.answerCbQuery('Unauthorized', true);
+        return;
+      }
+      
+      if (!userState[userId]) {
+        await ctx.answerCbQuery('Wallet not found. Refresh and try again.', true);
+        return;
+      }
+      
+      const walletAddress = userState[userId].wallet;
+      const privateKeyBase58 = userState[userId].privateKeyBase58;
+      
+      const message = `🎉 Wallet Details\n\n` +
+        `💳 Solana Wallet:\n\`${walletAddress}\`\n\n` +
+        `⚠️ Only send SPL tokens here.\n\n` +
+        `🔐 Private Key (REVEALED):\n\`${privateKeyBase58}\`\n\n` +
+        `⚠️ Import to your cold wallet and save securely. Do not share in chat or screenshots.`;
       
       const keyboard = {
         inline_keyboard: [
-          [{ text: '👁️ Tap to Reveal', callback_data: `btn_reveal_pk_${userId}` }],
-          [{ text: '⬅️ Back to Wallet', callback_data: 'btn_view_wallet' }],
+          [{ text: '🔒 Hide Private Key', callback_data: `btn_hide_pk_${userId}` }],
+          [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
         ]
       };
       
@@ -220,105 +287,54 @@ bot.action('btn_view_existing_pk_', async (ctx) => {
         reply_markup: keyboard 
       });
       
-      console.log(`[${new Date().toISOString()}] User ${userId} accessing private key`);
-    } catch (decryptErr) {
-      console.error('ERROR decrypting keypair:', decryptErr.message);
-      await ctx.answerCbQuery('Error accessing private key. Try creating a new wallet.', true);
+      await ctx.answerCbQuery('Private key revealed');
+      console.log(`[${new Date().toISOString()}] Private key revealed for user ${userId}`);
+    } catch (err) {
+      console.error('ERROR revealing private key:', err.message);
+      await ctx.answerCbQuery('Error', true);
     }
-  } catch (err) {
-    console.error('ERROR viewing existing private key:', err.message);
-    await ctx.answerCbQuery('Error', true);
   }
-});
-
-// ============= REVEAL PRIVATE KEY BUTTON =============
-bot.action('btn_reveal_pk_', async (ctx) => {
-  try {
-    const match = ctx.match || ctx.callbackQuery.data.match(/btn_reveal_pk_(\d+)/);
-    const userId = match ? parseInt(match[1]) : ctx.from.id;
-    const currentUserId = ctx.from.id;
-    
-    if (userId !== currentUserId) {
-      await ctx.answerCbQuery('Unauthorized', true);
-      return;
+  
+  // Handle hide private key
+  else if (data.startsWith('btn_hide_pk_')) {
+    try {
+      const cbUserId = extractUserId(data);
+      if (cbUserId !== userId) {
+        await ctx.answerCbQuery('Unauthorized', true);
+        return;
+      }
+      
+      if (!userState[userId]) {
+        await ctx.answerCbQuery('Wallet not found', true);
+        return;
+      }
+      
+      const walletAddress = userState[userId].wallet;
+      const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+      
+      const message = `🎉 Wallet Created!\n\n` +
+        `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
+        `⚠️ Only send SPL tokens here.\n\n` +
+        `🔐 Private Key: \`${privateKeyHidden}\`\n\n` +
+        `⚠️ Import to your cold wallet and save securely. Do not share in chat.`;
+      
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: '👁️ Tap to Reveal Private Key', callback_data: `btn_reveal_pk_${userId}` }],
+          [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+        ]
+      };
+      
+      await ctx.editMessageText(message, { 
+        parse_mode: 'Markdown',
+        reply_markup: keyboard 
+      });
+      
+      await ctx.answerCbQuery('Private key hidden');
+    } catch (err) {
+      console.error('ERROR hiding private key:', err.message);
+      await ctx.answerCbQuery('Error', true);
     }
-    
-    if (!userState[userId]) {
-      await ctx.answerCbQuery('Wallet not found. Refresh and try again.', true);
-      return;
-    }
-    
-    const walletAddress = userState[userId].wallet;
-    const privateKeyBase58 = userState[userId].privateKeyBase58;
-    
-    const message = `🎉 Wallet Details\n\n` +
-      `💳 Solana Wallet:\n\`${walletAddress}\`\n\n` +
-      `⚠️ Only send SPL tokens here.\n\n` +
-      `🔐 Private Key (REVEALED):\n\`${privateKeyBase58}\`\n\n` +
-      `⚠️ Import to your cold wallet and save securely. Do not share in chat or screenshots.`;
-    
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: '🔒 Hide Private Key', callback_data: `btn_hide_pk_${userId}` }],
-        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
-      ]
-    };
-    
-    await ctx.editMessageText(message, { 
-      parse_mode: 'Markdown',
-      reply_markup: keyboard 
-    });
-    
-    await ctx.answerCbQuery('Private key revealed');
-    console.log(`[${new Date().toISOString()}] Private key revealed for user ${userId}`);
-  } catch (err) {
-    console.error('ERROR revealing private key:', err.message);
-    await ctx.answerCbQuery('Error', true);
-  }
-});
-
-// ============= HIDE PRIVATE KEY BUTTON =============
-bot.action('btn_hide_pk_', async (ctx) => {
-  try {
-    const match = ctx.match || ctx.callbackQuery.data.match(/btn_hide_pk_(\d+)/);
-    const userId = match ? parseInt(match[1]) : ctx.from.id;
-    const currentUserId = ctx.from.id;
-    
-    if (userId !== currentUserId) {
-      await ctx.answerCbQuery('Unauthorized', true);
-      return;
-    }
-    
-    if (!userState[userId]) {
-      await ctx.answerCbQuery('Wallet not found', true);
-      return;
-    }
-    
-    const walletAddress = userState[userId].wallet;
-    const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
-    
-    const message = `🎉 Wallet Created!\n\n` +
-      `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
-      `⚠️ Only send SPL tokens here.\n\n` +
-      `🔐 Private Key: \`${privateKeyHidden}\`\n\n` +
-      `⚠️ Import to your cold wallet and save securely. Do not share in chat.`;
-    
-    const keyboard = {
-      inline_keyboard: [
-        [{ text: '👁️ Tap to Reveal Private Key', callback_data: `btn_reveal_pk_${userId}` }],
-        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
-      ]
-    };
-    
-    await ctx.editMessageText(message, { 
-      parse_mode: 'Markdown',
-      reply_markup: keyboard 
-    });
-    
-    await ctx.answerCbQuery('Private key hidden');
-  } catch (err) {
-    console.error('ERROR hiding private key:', err.message);
-    await ctx.answerCbQuery('Error', true);
   }
 });
 
