@@ -18,6 +18,7 @@ if (!token) {
 
 const bot = new Telegraf(token);
 const userState = {};
+let cachedPrices = { sol: null, usdc: null, timestamp: 0 };
 
 // Helper function to fetch LIVE balances
 async function getLiveBalances(walletAddress) {
@@ -42,6 +43,34 @@ async function getLiveBalances(walletAddress) {
   }
 }
 
+// Helper function to get prices with caching
+async function getPricesWithCache() {
+  try {
+    const now = Date.now();
+    const cacheTimeout = 60000; // Cache for 1 minute
+    
+    // Use cached price if still valid
+    if (cachedPrices.sol && cachedPrices.usdc && (now - cachedPrices.timestamp) < cacheTimeout) {
+      console.log('Using cached prices');
+      return { sol: cachedPrices.sol, usdc: cachedPrices.usdc };
+    }
+    
+    // Fetch new prices
+    const prices = await getTokenPrices();
+    cachedPrices = { sol: prices.sol, usdc: prices.usdc, timestamp: now };
+    return prices;
+  } catch (err) {
+    console.error('Error getting prices:', err.message);
+    // If we have cached prices (even if expired), return them
+    if (cachedPrices.sol && cachedPrices.usdc) {
+      console.log('Using expired cached prices as fallback');
+      return { sol: cachedPrices.sol, usdc: cachedPrices.usdc };
+    }
+    // Last resort: return null and handle in wallet card
+    return null;
+  }
+}
+
 // Helper function to get wallet card message
 async function getWalletCardMessage(userId) {
   try {
@@ -59,21 +88,39 @@ async function getWalletCardMessage(userId) {
     const { sol, usdc } = await getLiveBalances(walletAddress);
     
     // Get token prices
-    const prices = await getTokenPrices();
-    const solPrice = prices.sol;
-    const totalUsd = (sol * solPrice) + usdc;
+    const prices = await getPricesWithCache();
     
-    const message = `💰 Your Wallet\n\n` +
-      `📍 Address: \`${walletAddress}\`\n\n` +
-      `---\n` +
-      `💵 SOL Balance: ${sol} SOL ($${(sol * solPrice).toFixed(2)})\n` +
-      `💵 USDC Balance: $${usdc.toFixed(2)}\n` +
-      `📊 Total Bets: 0\n` +
-      `✅ Total Wins: 0\n` +
-      `❌ Total Losses: 0\n` +
-      `📈 Profit/Loss: 0%\n\n` +
-      `💸 Available to Withdraw: $${totalUsd.toFixed(2)}\n` +
-      `(${sol} SOL + $${usdc.toFixed(2)} USDC)`;
+    let message;
+    
+    if (prices && prices.sol && prices.usdc) {
+      const solPrice = prices.sol;
+      const totalUsd = (sol * solPrice) + usdc;
+      
+      message = `💰 Your Wallet\n\n` +
+        `📍 Address: \`${walletAddress}\`\n\n` +
+        `---\n` +
+        `💵 SOL Balance: ${sol} SOL ($${(sol * solPrice).toFixed(2)})\n` +
+        `💵 USDC Balance: $${usdc.toFixed(2)}\n` +
+        `📊 Total Bets: 0\n` +
+        `✅ Total Wins: 0\n` +
+        `❌ Total Losses: 0\n` +
+        `📈 Profit/Loss: 0%\n\n` +
+        `💸 Available to Withdraw: $${totalUsd.toFixed(2)}\n` +
+        `(${sol} SOL + $${usdc.toFixed(2)} USDC)`;
+    } else {
+      // Prices not available, show balances without USD conversion
+      message = `💰 Your Wallet\n\n` +
+        `📍 Address: \`${walletAddress}\`\n\n` +
+        `---\n` +
+        `💵 SOL Balance: ${sol} SOL\n` +
+        `💵 USDC Balance: $${usdc.toFixed(2)}\n` +
+        `📊 Total Bets: 0\n` +
+        `✅ Total Wins: 0\n` +
+        `❌ Total Losses: 0\n` +
+        `📈 Profit/Loss: 0%\n\n` +
+        `💸 Available to Withdraw: ${sol} SOL + $${usdc.toFixed(2)} USDC\n\n` +
+        `⚠️ (USD conversion unavailable)`;
+    }
     
     return {
       message,
@@ -81,7 +128,7 @@ async function getWalletCardMessage(userId) {
       encryptedKeypair: user.encrypted_keypair,
       sol,
       usdc,
-      solPrice
+      solPrice: prices ? prices.sol : null
     };
   } catch (err) {
     console.error('ERROR in getWalletCardMessage:', err.message);
@@ -404,9 +451,16 @@ bot.action('start_withdrawal', async (ctx) => {
     userState[userId] = userState[userId] || {};
     userState[userId].withdrawalInProgress = true;
     
-    const message = `💸 Select Token to Withdraw\n\n` +
-      `SOL: ${walletData.sol} ($${(walletData.sol * walletData.solPrice).toFixed(2)})\n` +
-      `USDC: $${walletData.usdc.toFixed(2)}`;
+    let message;
+    if (walletData.solPrice) {
+      message = `💸 Select Token to Withdraw\n\n` +
+        `SOL: ${walletData.sol} ($${(walletData.sol * walletData.solPrice).toFixed(2)})\n` +
+        `USDC: $${walletData.usdc.toFixed(2)}`;
+    } else {
+      message = `💸 Select Token to Withdraw\n\n` +
+        `SOL: ${walletData.sol}\n` +
+        `USDC: $${walletData.usdc.toFixed(2)}`;
+    }
     
     const keyboard = {
       inline_keyboard: [
