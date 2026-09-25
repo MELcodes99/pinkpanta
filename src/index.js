@@ -6,6 +6,7 @@ const { initializeDb } = require('./db/schema');
 const { runMigrations } = require('./db/migrations');
 const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance, getSolBalance, getUsdcBalance } = require('./solana/wallet');
 const { getOrCreateUser, getUser, updateUserWallet, deleteUserWallet, createMarket, getUserMarkets } = require('./db/queries');
+const { getTokenPrices, sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
@@ -17,19 +18,6 @@ if (!token) {
 
 const bot = new Telegraf(token);
 const userState = {};
-
-// Fetch SOL price from CoinGecko
-async function getSolPrice() {
-  try {
-    const response = await require('axios').get(
-      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd'
-    );
-    return response.data.solana.usd || 100; // Default to 100 if fetch fails
-  } catch (err) {
-    console.log('Could not fetch SOL price, using default 100');
-    return 100;
-  }
-}
 
 // Helper function to fetch LIVE balances
 async function getLiveBalances(walletAddress) {
@@ -70,8 +58,9 @@ async function getWalletCardMessage(userId) {
     // Fetch LIVE balances
     const { sol, usdc } = await getLiveBalances(walletAddress);
     
-    // Get SOL price and calculate total in USD
-    const solPrice = await getSolPrice();
+    // Get token prices
+    const prices = await getTokenPrices();
+    const solPrice = prices.sol;
     const totalUsd = (sol * solPrice) + usdc;
     
     const message = `💰 Your Wallet\n\n` +
@@ -416,7 +405,7 @@ bot.action('start_withdrawal', async (ctx) => {
     userState[userId].withdrawalInProgress = true;
     
     const message = `💸 Select Token to Withdraw\n\n` +
-      `SOL: ${walletData.sol} (${(walletData.sol * walletData.solPrice).toFixed(2)} USD)\n` +
+      `SOL: ${walletData.sol} ($${(walletData.sol * walletData.solPrice).toFixed(2)})\n` +
       `USDC: $${walletData.usdc.toFixed(2)}`;
     
     const keyboard = {
@@ -612,9 +601,33 @@ bot.action('confirm_withdrawal', async (ctx) => {
     
     await ctx.reply('⏳ Processing withdrawal... This may take a few seconds.');
     
-    // TODO: Send transaction
-    // For now, just show success message
-    await ctx.reply('✅ Withdrawal sent! Transaction confirmed.');
+    // Get user and decrypt keypair
+    const user = await getUser(userId);
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    
+    const token = userState[userId].selectedToken;
+    const amount = userState[userId].withdrawalAmount;
+    const toAddress = userState[userId].destinationAddress;
+    
+    let result;
+    
+    if (token === 'SOL') {
+      result = await sendSolWithdrawal(keypair, toAddress, amount);
+    } else {
+      result = await sendUsdcWithdrawal(keypair, toAddress, amount);
+    }
+    
+    if (result.success) {
+      const message = `✅ Withdrawal Successful!\n\n` +
+        `Token: ${result.token}\n` +
+        `Amount: ${result.amount}\n` +
+        `To: ${result.to}\n` +
+        `TX: \`${result.signature}\``;
+      
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+    } else {
+      await ctx.reply(`❌ Withdrawal Failed!\n\nError: ${result.error}`);
+    }
     
     // Clear withdrawal state
     delete userState[userId].selectedToken;
@@ -625,6 +638,7 @@ bot.action('confirm_withdrawal', async (ctx) => {
     await ctx.answerCbQuery();
   } catch (err) {
     console.error('ERROR in confirm_withdrawal:', err.message);
+    await ctx.reply(`❌ Error processing withdrawal: ${err.message}`);
     await ctx.answerCbQuery('Error', true);
   }
 });
