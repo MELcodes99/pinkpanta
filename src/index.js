@@ -2,7 +2,8 @@ require('dotenv').config();
 const http = require('http');
 const { Telegraf } = require('telegraf');
 const bs58 = require('bs58');
-const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance } = require('./solana/wallet');
+const { runMigrations } = require('./db/migrations');
+const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance, getSolBalance, getUsdcBalance } = require('./solana/wallet');
 const { getOrCreateUser, getUser, updateUserWallet, deleteUserWallet, createMarket, getUserMarkets } = require('./db/queries');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -16,30 +17,47 @@ if (!token) {
 const bot = new Telegraf(token);
 const userState = {};
 
-// Helper function to show wallet details
-async function getWalletMessage(userId) {
+// Helper function to fetch LIVE balances
+async function getLiveBalances(walletAddress) {
+  try {
+    console.log(`Fetching live balances for: ${walletAddress}`);
+    
+    const [sol, usdc] = await Promise.all([
+      getSolBalance(walletAddress).catch(err => {
+        console.error('SOL balance error:', err.message);
+        return 0;
+      }),
+      getUsdcBalance(walletAddress).catch(err => {
+        console.error('USDC balance error:', err.message);
+        return 0;
+      })
+    ]);
+    
+    return { sol, usdc };
+  } catch (err) {
+    console.error('ERROR in getLiveBalances:', err.message);
+    return { sol: 0, usdc: 0 };
+  }
+}
+
+// Helper function to get wallet card message
+async function getWalletCardMessage(userId) {
   try {
     const user = await getUser(userId);
+    
     if (!user || !user.wallet_address) {
+      console.log(`User not found or no wallet for userId: ${userId}`, user);
       return null;
     }
     
-    let sol = 0;
-    let usdc = 0;
+    const walletAddress = user.wallet_address;
+    console.log(`Getting wallet card for address: ${walletAddress}`);
     
-    try {
-      const balances = await Promise.race([
-        getUserBalance(user.wallet_address),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-      ]);
-      sol = balances.sol;
-      usdc = balances.usdc;
-    } catch (err) {
-      console.error('Balance fetch error:', err.message);
-    }
+    // Fetch LIVE balances
+    const { sol, usdc } = await getLiveBalances(walletAddress);
     
     const message = `💰 Your Wallet\n\n` +
-      `📍 Address: \`${user.wallet_address}\`\n\n` +
+      `📍 Address: \`${walletAddress}\`\n\n` +
       `---\n` +
       `💵 SOL Balance: ${sol} SOL\n` +
       `💵 USDC Balance: $${usdc.toFixed(2)}\n` +
@@ -52,11 +70,11 @@ async function getWalletMessage(userId) {
     
     return {
       message,
-      walletAddress: user.wallet_address,
+      walletAddress,
       encryptedKeypair: user.encrypted_keypair
     };
   } catch (err) {
-    console.error('ERROR getting wallet message:', err.message);
+    console.error('ERROR in getWalletCardMessage:', err.message);
     return null;
   }
 }
@@ -94,7 +112,7 @@ bot.command('wallet', async (ctx) => {
   try {
     const userId = ctx.from.id;
     
-    const walletData = await getWalletMessage(userId);
+    const walletData = await getWalletCardMessage(userId);
     if (!walletData) {
       await ctx.reply('No wallet found. Use /start to create one.');
       return;
@@ -155,7 +173,7 @@ bot.action('create_wallet', async (ctx) => {
       reply_markup: keyboard
     });
     
-    console.log(`[${new Date().toISOString()}] Wallet created for user ${userId}`);
+    console.log(`[${new Date().toISOString()}] Wallet created for user ${userId}, address: ${walletAddress}`);
   } catch (err) {
     console.error('ERROR creating wallet:', err.message);
     await ctx.answerCbQuery('Error creating wallet', true);
@@ -166,9 +184,11 @@ bot.action('create_wallet', async (ctx) => {
 bot.action('view_wallet', async (ctx) => {
   try {
     const userId = ctx.from.id;
+    console.log(`View wallet for user: ${userId}`);
     
-    const walletData = await getWalletMessage(userId);
+    const walletData = await getWalletCardMessage(userId);
     if (!walletData) {
+      console.log(`No wallet data found for user ${userId}`);
       await ctx.answerCbQuery('Wallet not found', true);
       return;
     }
@@ -214,15 +234,31 @@ bot.action('copy_address', async (ctx) => {
 bot.action('view_pk', async (ctx) => {
   try {
     const userId = ctx.from.id;
-    const user = await getUser(userId);
+    console.log(`Viewing private key for user: ${userId}`);
     
-    if (!user || !user.wallet_address || !user.encrypted_keypair) {
-      console.log('User data:', user);
-      await ctx.answerCbQuery('Wallet not found', true);
+    const user = await getUser(userId);
+    console.log(`User from DB:`, user);
+    
+    if (!user) {
+      console.log(`User not found in database for userId: ${userId}`);
+      await ctx.answerCbQuery('User not found', true);
+      return;
+    }
+    
+    if (!user.wallet_address) {
+      console.log(`No wallet address for user ${userId}`);
+      await ctx.answerCbQuery('No wallet address', true);
+      return;
+    }
+    
+    if (!user.encrypted_keypair) {
+      console.log(`No encrypted keypair for user ${userId}. Columns available:`, Object.keys(user));
+      await ctx.answerCbQuery('No encrypted keypair found', true);
       return;
     }
     
     try {
+      console.log(`Attempting to decrypt keypair for user ${userId}`);
       const keypair = decryptKeypair(user.encrypted_keypair);
       const privateKeyBase58 = bs58.encode(keypair.secretKey);
       
@@ -248,9 +284,12 @@ bot.action('view_pk', async (ctx) => {
         parse_mode: 'Markdown',
         reply_markup: keyboard
       });
+      
+      console.log(`Private key view initiated for user ${userId}`);
     } catch (decryptErr) {
       console.error('Decryption error:', decryptErr.message);
-      await ctx.answerCbQuery('Error accessing private key', true);
+      console.error('Encrypted data:', user.encrypted_keypair);
+      await ctx.answerCbQuery('Error decrypting private key', true);
     }
   } catch (err) {
     console.error('ERROR viewing pk:', err.message);
@@ -300,7 +339,7 @@ bot.action('hide_pk', async (ctx) => {
   try {
     const userId = ctx.from.id;
     
-    const walletData = await getWalletMessage(userId);
+    const walletData = await getWalletCardMessage(userId);
     if (!walletData) {
       await ctx.answerCbQuery('Wallet not found', true);
       return;
@@ -380,7 +419,6 @@ bot.on('text', async (ctx) => {
     const text = ctx.message.text.trim();
     
     if (userState[userId] && userState[userId].deleteInProgress && text === 'Delete') {
-      // Delete the wallet
       await deleteUserWallet(userId);
       delete userState[userId].deleteInProgress;
       
@@ -530,14 +568,19 @@ server.listen(PORT, () => {
   console.log(`[${new Date().toISOString()}] Listening on port ${PORT}`);
 });
 
-// ============= BOT POLLING =============
-console.log(`[${new Date().toISOString()}] Starting polling...`);
-bot.startPolling().catch(err => {
-  console.error('POLLING ERROR:', err);
+// ============= RUN MIGRATIONS AND START BOT =============
+runMigrations().then(() => {
+  console.log(`[${new Date().toISOString()}] Starting polling...`);
+  bot.startPolling().catch(err => {
+    console.error('POLLING ERROR:', err);
+    process.exit(1);
+  });
+  
+  console.log(`[${new Date().toISOString()}] Bot polling started!`);
+}).catch(err => {
+  console.error('Migration error:', err);
   process.exit(1);
 });
-
-console.log(`[${new Date().toISOString()}] Bot polling started!`);
 
 // ============= GRACEFUL SHUTDOWN =============
 process.once('SIGINT', () => bot.stop('SIGINT'));
