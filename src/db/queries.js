@@ -1,77 +1,108 @@
 const { db } = require('./schema');
 
-// Users
-function getOrCreateUser(telegramId, username) {
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO users (telegram_id, username)
-    VALUES (?, ?)
-  `);
-  stmt.run(telegramId, username);
-
-  const user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
-  return user;
+// Get or create user
+function getOrCreateUser(userId, username) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM users WHERE telegram_id = ?', [userId], (err, row) => {
+      if (err) reject(err);
+      if (row) {
+        resolve(row);
+      } else {
+        db.run('INSERT INTO users (telegram_id, username) VALUES (?, ?)', [userId, username], function(err) {
+          if (err) reject(err);
+          resolve({ id: this.lastID, telegram_id: userId, username });
+        });
+      }
+    });
+  });
 }
 
-function getUser(telegramId) {
-  return db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(telegramId);
+// Get user
+function getUser(userId) {
+  return new Promise((resolve, reject) => {
+    db.get('SELECT * FROM users WHERE telegram_id = ?', [userId], (err, row) => {
+      if (err) reject(err);
+      resolve(row);
+    });
+  });
 }
 
-function updateUserWallet(telegramId, walletAddress) {
-  db.prepare(`
-    UPDATE users SET wallet_address = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE telegram_id = ?
-  `).run(walletAddress, telegramId);
+// Update user wallet
+function updateUserWallet(userId, walletAddress, encryptedKeypair) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'UPDATE users SET wallet_address = ?, encrypted_keypair = ? WHERE telegram_id = ?',
+      [walletAddress, encryptedKeypair, userId],
+      function(err) {
+        if (err) reject(err);
+        resolve({ wallet_address: walletAddress });
+      }
+    );
+  });
 }
 
-// Markets
-function createMarket(marketId, creatorId, title, description, groupChatId, expiresAt) {
-  db.prepare(`
-    INSERT INTO markets (market_id, creator_id, title, description, group_chat_id, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(marketId, creatorId, title, description, groupChatId, expiresAt);
+// Delete user wallet
+function deleteUserWallet(userId) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'UPDATE users SET wallet_address = NULL, encrypted_keypair = NULL WHERE telegram_id = ?',
+      [userId],
+      function(err) {
+        if (err) reject(err);
+        resolve();
+      }
+    );
+  });
 }
 
-function getMarket(marketId) {
-  return db.prepare('SELECT * FROM markets WHERE market_id = ?').get(marketId);
+// Create market
+function createMarket(marketId, creatorId, title, description, groupChatId) {
+  return new Promise((resolve, reject) => {
+    db.run(
+      'INSERT INTO markets (market_id, creator_id, title, description, group_chat_id) VALUES (?, ?, ?, ?, ?)',
+      [marketId, creatorId, title, description, groupChatId],
+      function(err) {
+        if (err) reject(err);
+        resolve({ market_id: marketId, creator_id: creatorId });
+      }
+    );
+  });
 }
 
+// Get user markets
 function getUserMarkets(userId) {
-  return db.prepare(`
-    SELECT * FROM markets WHERE creator_id = ? ORDER BY created_at DESC
-  `).all(userId);
+  return new Promise((resolve, reject) => {
+    db.all(
+      'SELECT * FROM markets WHERE creator_id = (SELECT id FROM users WHERE telegram_id = ?)',
+      [userId],
+      (err, rows) => {
+        if (err) reject(err);
+        resolve(rows || []);
+      }
+    );
+  });
 }
 
-// Positions
-function createPosition(userId, marketId, outcome, shares, valueUsdc) {
-  db.prepare(`
-    INSERT OR REPLACE INTO positions (user_id, market_id, outcome, shares, value_usdc)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(userId, marketId, outcome, shares, valueUsdc);
-}
-
+// Get user positions
 function getUserPositions(userId) {
-  return db.prepare(`
-    SELECT p.*, m.title, m.status FROM positions p
-    JOIN markets m ON p.market_id = m.market_id
-    WHERE p.user_id = ? ORDER BY p.updated_at DESC
-  `).all(userId);
-}
-
-function getUserPositionInMarket(userId, marketId, outcome) {
-  return db.prepare(`
-    SELECT * FROM positions
-    WHERE user_id = ? AND market_id = ? AND outcome = ?
-  `).get(userId, marketId, outcome);
+  return new Promise((resolve, reject) => {
+    db.all(
+      'SELECT * FROM positions WHERE user_id = (SELECT id FROM users WHERE telegram_id = ?)',
+      [userId],
+      (err, rows) => {
+        if (err) reject(err);
+        resolve(rows || []);
+      }
+    );
+  });
 }
 
 module.exports = {
   getOrCreateUser,
   getUser,
   updateUserWallet,
+  deleteUserWallet,
   createMarket,
-  getMarket,
   getUserMarkets,
-  createPosition,
-  getUserPositions,
-  getUserPositionInMarket,
+  getUserPositions
 };
