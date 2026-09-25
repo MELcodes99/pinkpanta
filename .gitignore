@@ -1,2 +1,5 @@
 .env
 node_modules/
+pinkpanta.db
+test-wallet.js
+*.db
