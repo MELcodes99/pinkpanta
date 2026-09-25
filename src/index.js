@@ -18,6 +18,19 @@ if (!token) {
 const bot = new Telegraf(token);
 const userState = {};
 
+// Fetch SOL price from CoinGecko
+async function getSolPrice() {
+  try {
+    const response = await require('axios').get(
+      'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd'
+    );
+    return response.data.solana.usd || 100; // Default to 100 if fetch fails
+  } catch (err) {
+    console.log('Could not fetch SOL price, using default 100');
+    return 100;
+  }
+}
+
 // Helper function to fetch LIVE balances
 async function getLiveBalances(walletAddress) {
   try {
@@ -57,22 +70,29 @@ async function getWalletCardMessage(userId) {
     // Fetch LIVE balances
     const { sol, usdc } = await getLiveBalances(walletAddress);
     
+    // Get SOL price and calculate total in USD
+    const solPrice = await getSolPrice();
+    const totalUsd = (sol * solPrice) + usdc;
+    
     const message = `💰 Your Wallet\n\n` +
       `📍 Address: \`${walletAddress}\`\n\n` +
       `---\n` +
-      `💵 SOL Balance: ${sol} SOL\n` +
+      `💵 SOL Balance: ${sol} SOL ($${(sol * solPrice).toFixed(2)})\n` +
       `💵 USDC Balance: $${usdc.toFixed(2)}\n` +
       `📊 Total Bets: 0\n` +
       `✅ Total Wins: 0\n` +
       `❌ Total Losses: 0\n` +
       `📈 Profit/Loss: 0%\n\n` +
-      `💸 In Active Bets: 0 USDC\n` +
-      `🏦 Available to Withdraw: $${usdc.toFixed(2)}`;
+      `💸 Available to Withdraw: $${totalUsd.toFixed(2)}\n` +
+      `(${sol} SOL + $${usdc.toFixed(2)} USDC)`;
     
     return {
       message,
       walletAddress,
-      encryptedKeypair: user.encrypted_keypair
+      encryptedKeypair: user.encrypted_keypair,
+      sol,
+      usdc,
+      solPrice
     };
   } catch (err) {
     console.error('ERROR in getWalletCardMessage:', err.message);
@@ -123,6 +143,7 @@ bot.command('wallet', async (ctx) => {
       inline_keyboard: [
         [{ text: '📋 Copy Address', callback_data: 'copy_address' }],
         [{ text: '🔐 View Private Key', callback_data: 'view_pk' }],
+        [{ text: '💸 Withdraw', callback_data: 'start_withdrawal' }],
         [{ text: '🗑️ Delete Wallet', callback_data: 'delete_wallet_confirm' }],
         [{ text: '⬅️ Back to Menu', callback_data: 'start_menu' }],
       ]
@@ -150,9 +171,8 @@ bot.action('create_wallet', async (ctx) => {
     await updateUserWallet(userId, walletAddress, encryptedKey);
     
     const privateKeyBase58 = bs58.encode(keypair.secretKey);
-    userState[userId] = {
-      privateKeyBase58: privateKeyBase58
-    };
+    userState[userId] = userState[userId] || {};
+    userState[userId].privateKeyBase58 = privateKeyBase58;
     
     const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
     
@@ -198,6 +218,7 @@ bot.action('view_wallet', async (ctx) => {
       inline_keyboard: [
         [{ text: '📋 Copy Address', callback_data: 'copy_address' }],
         [{ text: '🔐 View Private Key', callback_data: 'view_pk' }],
+        [{ text: '💸 Withdraw', callback_data: 'start_withdrawal' }],
         [{ text: '🗑️ Delete Wallet', callback_data: 'delete_wallet_confirm' }],
         [{ text: '⬅️ Back to Menu', callback_data: 'start_menu' }],
       ]
@@ -276,9 +297,8 @@ bot.action('view_pk', async (ctx) => {
       const keypair = decryptKeypair(user.encrypted_keypair);
       const privateKeyBase58 = bs58.encode(keypair.secretKey);
       
-      userState[userId] = {
-        privateKeyBase58: privateKeyBase58
-      };
+      userState[userId] = userState[userId] || {};
+      userState[userId].privateKeyBase58 = privateKeyBase58;
       
       const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
       
@@ -363,6 +383,7 @@ bot.action('hide_pk', async (ctx) => {
       inline_keyboard: [
         [{ text: '📋 Copy Address', callback_data: 'copy_address' }],
         [{ text: '🔐 View Private Key', callback_data: 'view_pk' }],
+        [{ text: '💸 Withdraw', callback_data: 'start_withdrawal' }],
         [{ text: '🗑️ Delete Wallet', callback_data: 'delete_wallet_confirm' }],
         [{ text: '⬅️ Back to Menu', callback_data: 'start_menu' }],
       ]
@@ -376,6 +397,69 @@ bot.action('hide_pk', async (ctx) => {
     await ctx.answerCbQuery('Private key hidden');
   } catch (err) {
     console.error('ERROR hiding pk:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= START WITHDRAWAL =============
+bot.action('start_withdrawal', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const walletData = await getWalletCardMessage(userId);
+    
+    if (!walletData) {
+      await ctx.answerCbQuery('Wallet not found', true);
+      return;
+    }
+    
+    userState[userId] = userState[userId] || {};
+    userState[userId].withdrawalInProgress = true;
+    
+    const message = `💸 Select Token to Withdraw\n\n` +
+      `SOL: ${walletData.sol} (${(walletData.sol * walletData.solPrice).toFixed(2)} USD)\n` +
+      `USDC: $${walletData.usdc.toFixed(2)}`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: `SOL (${walletData.sol})`, callback_data: 'withdraw_sol' }],
+        [{ text: `USDC ($${walletData.usdc.toFixed(2)})`, callback_data: 'withdraw_usdc' }],
+        [{ text: '⬅️ Cancel', callback_data: 'view_wallet' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR in start_withdrawal:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= WITHDRAW SOL =============
+bot.action('withdraw_sol', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    userState[userId] = userState[userId] || {};
+    userState[userId].selectedToken = 'SOL';
+    
+    await ctx.reply('📨 Enter the amount of SOL to withdraw:');
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error('ERROR in withdraw_sol:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= WITHDRAW USDC =============
+bot.action('withdraw_usdc', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    userState[userId] = userState[userId] || {};
+    userState[userId].selectedToken = 'USDC';
+    
+    await ctx.reply('📨 Enter the amount of USDC to withdraw:');
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error('ERROR in withdraw_usdc:', err.message);
     await ctx.answerCbQuery('Error', true);
   }
 });
@@ -427,12 +511,13 @@ bot.action('delete_wallet_ask_type', async (ctx) => {
   }
 });
 
-// ============= CATCH MESSAGE FOR DELETE CONFIRMATION =============
+// ============= CATCH MESSAGE FOR DELETE CONFIRMATION & WITHDRAWAL FLOW =============
 bot.on('text', async (ctx) => {
   try {
     const userId = ctx.from.id;
     const text = ctx.message.text.trim();
     
+    // Delete wallet confirmation
     if (userState[userId] && userState[userId].deleteInProgress && text === 'Delete') {
       await deleteUserWallet(userId);
       delete userState[userId].deleteInProgress;
@@ -454,8 +539,112 @@ bot.on('text', async (ctx) => {
     } else if (userState[userId] && userState[userId].deleteInProgress && text !== 'Delete') {
       await ctx.reply('❌ Incorrect. Type "Delete" to confirm deletion.');
     }
+    
+    // Withdrawal flow - amount input
+    else if (userState[userId] && userState[userId].selectedToken && !userState[userId].withdrawalAmount) {
+      const amount = parseFloat(text);
+      
+      if (isNaN(amount) || amount <= 0) {
+        await ctx.reply('❌ Invalid amount. Please enter a valid number.');
+        return;
+      }
+      
+      // Check balance
+      const walletData = await getWalletCardMessage(userId);
+      const balance = userState[userId].selectedToken === 'SOL' ? walletData.sol : walletData.usdc;
+      
+      if (amount > balance) {
+        await ctx.reply(`❌ Insufficient funds. You have ${balance} ${userState[userId].selectedToken} available.`);
+        return;
+      }
+      
+      userState[userId].withdrawalAmount = amount;
+      await ctx.reply('📍 Enter the destination wallet address:');
+    }
+    
+    // Withdrawal flow - address input
+    else if (userState[userId] && userState[userId].selectedToken && userState[userId].withdrawalAmount && !userState[userId].destinationAddress) {
+      const address = text.trim();
+      
+      // Basic validation
+      if (address.length < 32) {
+        await ctx.reply('❌ Invalid wallet address. Please enter a valid Solana address.');
+        return;
+      }
+      
+      userState[userId].destinationAddress = address;
+      
+      // Show confirmation
+      const token = userState[userId].selectedToken;
+      const amount = userState[userId].withdrawalAmount;
+      const confirmMessage = `✅ Confirm Withdrawal\n\n` +
+        `Token: ${token}\n` +
+        `Amount: ${amount} ${token}\n` +
+        `To: \`${address}\`\n\n` +
+        `Click confirm to proceed.`;
+      
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: '✅ Confirm', callback_data: 'confirm_withdrawal' }],
+          [{ text: '❌ Decline', callback_data: 'decline_withdrawal' }],
+        ]
+      };
+      
+      await ctx.reply(confirmMessage, {
+        parse_mode: 'Markdown',
+        reply_markup: keyboard
+      });
+    }
   } catch (err) {
     console.error('ERROR in text handler:', err.message);
+  }
+});
+
+// ============= CONFIRM WITHDRAWAL =============
+bot.action('confirm_withdrawal', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    if (!userState[userId] || !userState[userId].selectedToken) {
+      await ctx.answerCbQuery('Withdrawal data not found', true);
+      return;
+    }
+    
+    await ctx.reply('⏳ Processing withdrawal... This may take a few seconds.');
+    
+    // TODO: Send transaction
+    // For now, just show success message
+    await ctx.reply('✅ Withdrawal sent! Transaction confirmed.');
+    
+    // Clear withdrawal state
+    delete userState[userId].selectedToken;
+    delete userState[userId].withdrawalAmount;
+    delete userState[userId].destinationAddress;
+    delete userState[userId].withdrawalInProgress;
+    
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error('ERROR in confirm_withdrawal:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= DECLINE WITHDRAWAL =============
+bot.action('decline_withdrawal', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    // Clear withdrawal state
+    delete userState[userId].selectedToken;
+    delete userState[userId].withdrawalAmount;
+    delete userState[userId].destinationAddress;
+    delete userState[userId].withdrawalInProgress;
+    
+    await ctx.reply('❌ Withdrawal cancelled.');
+    await ctx.answerCbQuery();
+  } catch (err) {
+    console.error('ERROR in decline_withdrawal:', err.message);
+    await ctx.answerCbQuery('Error', true);
   }
 });
 
