@@ -11,7 +11,7 @@
     "telegraf": "^4.x.x",
     "axios": "^1.x.x",
     "dotenv": "^16.x.x",
-    "sqlite3": "^5.x.x",
+    "pg": "^8.x.x",
     "@solana/web3.js": "^1.x.x",
     "@solana/spl-token": "^0.x.x",
     "bs58": "^5.x.x"

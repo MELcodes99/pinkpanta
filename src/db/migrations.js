@@ -1,32 +1,24 @@
-const { db } = require('./schema');
+const { pool } = require('./schema');
 
-function runMigrations() {
-  return new Promise((resolve, reject) => {
+async function runMigrations() {
+  try {
     // Check if encrypted_keypair column exists
-    db.all("PRAGMA table_info(users)", (err, rows) => {
-      if (err) {
-        reject(err);
-        return;
-      }
+    const result = await pool.query(
+      `SELECT column_name FROM information_schema.columns 
+       WHERE table_name = 'users' AND column_name = 'encrypted_keypair'`
+    );
 
-      const hasColumn = rows.some(row => row.name === 'encrypted_keypair');
-      
-      if (!hasColumn) {
-        console.log('Adding encrypted_keypair column...');
-        db.run('ALTER TABLE users ADD COLUMN encrypted_keypair TEXT', (err) => {
-          if (err) {
-            reject(err);
-          } else {
-            console.log('✓ Migration complete: encrypted_keypair column added');
-            resolve();
-          }
-        });
-      } else {
-        console.log('✓ Database schema up to date');
-        resolve();
-      }
-    });
-  });
+    if (result.rows.length === 0) {
+      console.log('Adding encrypted_keypair column...');
+      await pool.query('ALTER TABLE users ADD COLUMN encrypted_keypair TEXT');
+      console.log('✓ Migration complete: encrypted_keypair column added');
+    } else {
+      console.log('✓ Database schema up to date');
+    }
+  } catch (err) {
+    console.error('Error running migrations:', err);
+    throw err;
+  }
 }
 
 module.exports = { runMigrations };
