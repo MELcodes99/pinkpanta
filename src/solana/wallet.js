@@ -12,18 +12,27 @@ function generateUserKeypair() {
 
 // Encrypt keypair for storage
 function encryptKeypair(keypair, encryptionKey = process.env.ENCRYPTION_KEY) {
-  const cipher = crypto.createCipher('aes-256-cbc', encryptionKey || 'default-key');
+  const key = crypto.scryptSync(encryptionKey || 'default-key', 'salt', 32);
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', key, iv);
+  
   const secretKey = JSON.stringify(Array.from(keypair.secretKey));
   let encrypted = cipher.update(secretKey, 'utf8', 'hex');
   encrypted += cipher.final('hex');
-  return encrypted;
+  
+  return iv.toString('hex') + ':' + encrypted;
 }
 
 // Decrypt keypair from storage
-function decryptKeypair(encrypted, encryptionKey = process.env.ENCRYPTION_KEY) {
-  const decipher = crypto.createDecipher('aes-256-cbc', encryptionKey || 'default-key');
+function decryptKeypair(data, encryptionKey = process.env.ENCRYPTION_KEY) {
+  const [ivHex, encrypted] = data.split(':');
+  const key = crypto.scryptSync(encryptionKey || 'default-key', 'salt', 32);
+  const iv = Buffer.from(ivHex, 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  
   let decrypted = decipher.update(encrypted, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
+  
   const secretKeyArray = JSON.parse(decrypted);
   return Keypair.fromSecretKey(new Uint8Array(secretKeyArray));
 }
