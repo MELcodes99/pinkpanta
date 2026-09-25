@@ -12,8 +12,7 @@ pool.on('error', (err) => {
 async function initializeDb() {
   try {
     const client = await pool.connect();
-    
-    // Create users table
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -27,37 +26,50 @@ async function initializeDb() {
       );
     `);
 
-    // Create markets table
     await client.query(`
       CREATE TABLE IF NOT EXISTS markets (
         id SERIAL PRIMARY KEY,
         market_id TEXT UNIQUE NOT NULL,
         creator_id INTEGER NOT NULL,
+        creator_telegram_id BIGINT,
+        creator_username TEXT,
         title TEXT NOT NULL,
         description TEXT,
+        resolution_rules TEXT,
+        yes_condition TEXT,
+        no_condition TEXT,
         group_chat_id BIGINT,
+        group_name TEXT,
         status TEXT DEFAULT 'open',
         volume_usdc TEXT DEFAULT '0.00',
+        yes_percentage TEXT DEFAULT '50.00',
+        no_percentage TEXT DEFAULT '50.00',
+        image_url TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        start_time BIGINT,
+        end_time BIGINT,
+        resolution_time BIGINT,
         expires_at TIMESTAMP,
         FOREIGN KEY (creator_id) REFERENCES users(id)
       );
     `);
 
-    // Create positions table
     await client.query(`
-      CREATE TABLE IF NOT EXISTS positions (
+      CREATE TABLE IF NOT EXISTS bets (
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL,
+        telegram_id BIGINT NOT NULL,
         market_id TEXT NOT NULL,
-        outcome TEXT NOT NULL,
-        shares TEXT NOT NULL,
-        value_usdc TEXT DEFAULT '0.00',
+        side TEXT NOT NULL,
+        amount_usdc TEXT NOT NULL,
+        shares TEXT,
+        avg_price TEXT,
+        fee_usdc TEXT,
+        order_id TEXT,
+        signature TEXT,
+        status TEXT DEFAULT 'submitted',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id),
-        FOREIGN KEY (market_id) REFERENCES markets(market_id),
-        UNIQUE(user_id, market_id, outcome)
+        FOREIGN KEY (user_id) REFERENCES users(id)
       );
     `);
 
