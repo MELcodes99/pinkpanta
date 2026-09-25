@@ -1,32 +1,326 @@
 require('dotenv').config();
 const http = require('http');
 const { Telegraf } = require('telegraf');
+const { generateUserKeypair, encryptKeypair, decryptKeypair, getUserBalance } = require('./solana/wallet');
+const { getOrCreateUser, getUser, updateUserWallet, createMarket, getUserMarkets } = require('./db/queries');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
+
+if (!token) {
+  console.error('ERROR: TELEGRAM_BOT_TOKEN not set');
+  process.exit(1);
+}
+
 const bot = new Telegraf(token);
 
-// Catch ANY message
-bot.on('message', (ctx) => {
-  console.log('MESSAGE RECEIVED:', ctx.message.text);
-  ctx.reply('Got message: ' + ctx.message.text).catch(e => console.error('REPLY FAILED:', e));
+// Store temporary state for button interactions (wallets in progress, etc)
+const userState = {};
+
+// ============= /START COMMAND =============
+bot.command('start', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const username = ctx.from.username || ctx.from.first_name || 'User';
+    
+    // Get or create user in database
+    await getOrCreateUser(userId, username);
+    
+    const greeting = `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Community Prediction Markets, powered by Panta, live on Solana.`;
+    
+    // Inline keyboard with buttons
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '💰 Create Wallet', callback_data: 'btn_create_wallet' }],
+        [{ text: '📊 Markets', callback_data: 'btn_markets' }],
+        [{ text: '📈 My Positions', callback_data: 'btn_positions' }],
+      ]
+    };
+    
+    await ctx.reply(greeting, { reply_markup: keyboard });
+    console.log(`[${new Date().toISOString()}] /start from @${username} (${userId})`);
+  } catch (err) {
+    console.error('ERROR in /start:', err.message);
+    await ctx.reply('Error starting bot. Please try again.');
+  }
 });
 
-bot.catch((err) => console.error('BOT ERROR:', err));
+// ============= BUTTON CALLBACKS =============
 
+// CREATE WALLET BUTTON
+bot.action('btn_create_wallet', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const username = ctx.from.username || ctx.from.first_name;
+    
+    // Generate new keypair
+    const keypair = generateUserKeypair();
+    const walletAddress = keypair.publicKey.toString();
+    
+    // Encrypt and store
+    const encryptedKey = encryptKeypair(keypair);
+    await updateUserWallet(userId, walletAddress, encryptedKey);
+    
+    // Store private key in temp state (expires after reveal)
+    userState[userId] = {
+      wallet: walletAddress,
+      privateKeyRevealed: false,
+      privateKeyArray: keypair.secretKey // array of numbers
+    };
+    
+    const privateKeyString = '[' + keypair.secretKey.join(', ') + ']';
+    const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+    
+    const message = `🎉 Wallet Created!\n\n` +
+      `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
+      `⚠️ Only send SPL tokens here.\n\n` +
+      `🔐 Private Key: \`${privateKeyHidden}\`\n\n` +
+      `⚠️ Import to your cold wallet and save securely. Do not share in chat.`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '👁️ Tap to Reveal Private Key', callback_data: `btn_reveal_pk_${userId}` }],
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+    console.log(`[${new Date().toISOString()}] Wallet created for @${username} (${userId})`);
+  } catch (err) {
+    console.error('ERROR creating wallet:', err.message);
+    await ctx.answerCbQuery('Error creating wallet', true);
+  }
+});
+
+// REVEAL PRIVATE KEY BUTTON
+bot.action(/btn_reveal_pk_(\d+)/, async (ctx) => {
+  try {
+    const userId = parseInt(ctx.match[1]);
+    const currentUserId = ctx.from.id;
+    
+    if (userId !== currentUserId) {
+      await ctx.answerCbQuery('Unauthorized', true);
+      return;
+    }
+    
+    if (!userState[userId]) {
+      await ctx.answerCbQuery('Wallet not found. Create a new one.', true);
+      return;
+    }
+    
+    const walletAddress = userState[userId].wallet;
+    const privateKeyArray = userState[userId].privateKeyArray;
+    const privateKeyString = '[' + privateKeyArray.join(', ') + ']';
+    
+    const message = `🎉 Wallet Details\n\n` +
+      `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
+      `⚠️ Only send SPL tokens here.\n\n` +
+      `🔐 Private Key (REVEALED): \n\`\`\`\n${privateKeyString}\n\`\`\`\n\n` +
+      `⚠️ Import to your cold wallet and save securely. Do not share in chat or screenshots.`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '🔒 Hide Private Key', callback_data: `btn_hide_pk_${userId}` }],
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+    await ctx.answerCbQuery('Private key revealed');
+    console.log(`[${new Date().toISOString()}] Private key revealed for user ${userId}`);
+  } catch (err) {
+    console.error('ERROR revealing private key:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// HIDE PRIVATE KEY BUTTON
+bot.action(/btn_hide_pk_(\d+)/, async (ctx) => {
+  try {
+    const userId = parseInt(ctx.match[1]);
+    const currentUserId = ctx.from.id;
+    
+    if (userId !== currentUserId) {
+      await ctx.answerCbQuery('Unauthorized', true);
+      return;
+    }
+    
+    if (!userState[userId]) {
+      await ctx.answerCbQuery('Wallet not found', true);
+      return;
+    }
+    
+    const walletAddress = userState[userId].wallet;
+    const privateKeyHidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
+    
+    const message = `🎉 Wallet Created!\n\n` +
+      `💳 Solana Wallet: \`${walletAddress}\`\n\n` +
+      `⚠️ Only send SPL tokens here.\n\n` +
+      `🔐 Private Key: \`${privateKeyHidden}\`\n\n` +
+      `⚠️ Import to your cold wallet and save securely. Do not share in chat.`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '👁️ Tap to Reveal Private Key', callback_data: `btn_reveal_pk_${userId}` }],
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { 
+      parse_mode: 'Markdown',
+      reply_markup: keyboard 
+    });
+    
+    await ctx.answerCbQuery('Private key hidden');
+  } catch (err) {
+    console.error('ERROR hiding private key:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// MARKETS BUTTON
+bot.action('btn_markets', async (ctx) => {
+  try {
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '📊 My Markets', callback_data: 'btn_my_markets' }],
+        [{ text: '🎯 Joined Markets', callback_data: 'btn_joined_markets' }],
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    const message = 'Choose an option:';
+    
+    await ctx.editMessageText(message, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR in markets menu:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// MY MARKETS
+bot.action('btn_my_markets', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const markets = await getUserMarkets(userId);
+    
+    let message = '📊 Your Created Markets:\n\n';
+    
+    if (markets.length === 0) {
+      message += 'No markets created yet. Use /create to start one!';
+    } else {
+      markets.forEach((m, i) => {
+        message += `${i + 1}. ${m.title || m.category}\n   ID: ${m.market_id}\n   Status: ${m.status}\n\n`;
+      });
+    }
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '⬅️ Back to Markets', callback_data: 'btn_markets' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR fetching my markets:', err.message);
+    await ctx.answerCbQuery('Error fetching markets', true);
+  }
+});
+
+// JOINED MARKETS
+bot.action('btn_joined_markets', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    
+    // TODO: Implement joined markets logic
+    const message = '🎯 Joined Markets:\n\nFeature coming soon!';
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '⬅️ Back to Markets', callback_data: 'btn_markets' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR fetching joined markets:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// POSITIONS BUTTON
+bot.action('btn_positions', async (ctx) => {
+  try {
+    // TODO: Implement positions logic
+    const message = '📈 Your Positions:\n\nFeature coming soon!';
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '⬅️ Back to Menu', callback_data: 'btn_start_menu' }],
+      ]
+    };
+    
+    await ctx.editMessageText(message, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR fetching positions:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// BACK TO START MENU
+bot.action('btn_start_menu', async (ctx) => {
+  try {
+    const username = ctx.from.username || ctx.from.first_name;
+    
+    const greeting = `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Community Prediction Markets, powered by Panta, live on Solana.`;
+    
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '💰 Create Wallet', callback_data: 'btn_create_wallet' }],
+        [{ text: '📊 Markets', callback_data: 'btn_markets' }],
+        [{ text: '📈 My Positions', callback_data: 'btn_positions' }],
+      ]
+    };
+    
+    await ctx.editMessageText(greeting, { reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR going back to menu:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+// ============= ERROR HANDLERS =============
+bot.catch((err, ctx) => {
+  console.error('BOT ERROR:', err);
+});
+
+// ============= HTTP SERVER FOR RENDER =============
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('Running');
+  res.end('PinkPanta bot running');
 });
 
-server.listen(PORT, () => console.log(`Listening on ${PORT}`));
-
-console.log('Starting polling...');
-bot.startPolling();
-console.log('Bot polling!');
-
-process.once('SIGINT', () => {
-  bot.stop('SIGINT');
-  server.close();
-  process.exit(0);
+server.listen(PORT, () => {
+  console.log(`[${new Date().toISOString()}] Listening on port ${PORT}`);
 });
+
+// ============= BOT POLLING =============
+console.log(`[${new Date().toISOString()}] Starting polling...`);
+bot.startPolling().catch(err => {
+  console.error('POLLING ERROR:', err);
+  process.exit(1);
+});
+
+console.log(`[${new Date().toISOString()}] Bot polling started!`);
+
+// ============= GRACEFUL SHUTDOWN =============
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
