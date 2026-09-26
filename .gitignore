@@ -3,3 +3,5 @@ node_modules/
 pinkpanta.db
 test-wallet.js
 *.db
+probe-*.js
+test-*.js
