@@ -21,25 +21,52 @@ async function getMarket(marketId) {
   return response.data;
 }
 
-// Fetch open (primary) markets, enrich each with detail (list returns empty
-// titles; detail has the real question + rule + category), keep only ones with
-// a real question and a live price.
+// ---- 60s cache for the bettable-markets list ----
+let _cache = { at: 0, markets: [] };
+const CACHE_MS = 60 * 1000;
+
+// small helper: run promises with limited concurrency (avoid rate limits)
+async function mapLimit(items, limit, fn) {
+  const results = [];
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      try { results[idx] = await fn(items[idx]); }
+      catch (_) { results[idx] = null; }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+// Fetch open (primary) markets, enrich in parallel (limited concurrency) with
+// detail to get the real question/price, keep only ones with a question + price.
+// Cached for 60s so repeat opens are instant.
 async function getBettableMarkets(category = null, want = 12) {
+  const now = Date.now();
+  if (now - _cache.at < CACHE_MS && _cache.markets.length) {
+    return category ? _cache.markets.filter(m => m.category === category).slice(0, want)
+                    : _cache.markets.slice(0, want);
+  }
+
   const primary = await listMarketsByStatus('primary', 50);
+  // enrich the first ~20 in parallel, 5 at a time
+  const candidates = primary.slice(0, 20);
+  const details = await mapLimit(candidates, 5, (m) => getMarket(m.marketId));
+
   const out = [];
-  for (const m of primary) {
-    if (out.length >= want) break;
-    let detail;
-    try { detail = await getMarket(m.marketId); } catch (_) { continue; }
+  for (let k = 0; k < candidates.length; k++) {
+    const m = candidates[k];
+    const detail = details[k];
+    if (!detail) continue;
     const question = (detail.question || detail.title || '').trim();
     if (!question) continue;
     const yes = detail.primaryYesPrice ?? m.primaryYesPrice;
     if (yes == null) continue;
-    const cat = detail.category || m.category;
-    if (category && cat !== category) continue;
     out.push({
       marketId: m.marketId,
-      category: cat,
+      category: detail.category || m.category,
       question,
       description: (detail.description || '').trim(),
       resolutionRule: (detail.resolutionRule || '').trim(),
@@ -51,22 +78,9 @@ async function getBettableMarkets(category = null, want = 12) {
       status: detail.status || m.status,
     });
   }
-  return out;
-}
 
-async function countBettableByCategory() {
-  const primary = await listMarketsByStatus('primary', 50);
-  const counts = {};
-  for (const m of primary) {
-    let detail;
-    try { detail = await getMarket(m.marketId); } catch (_) { continue; }
-    const question = (detail.question || detail.title || '').trim();
-    const yes = detail.primaryYesPrice ?? m.primaryYesPrice;
-    if (!question || yes == null) continue;
-    const cat = detail.category || m.category;
-    counts[cat] = (counts[cat] || 0) + 1;
-  }
-  return counts;
+  _cache = { at: now, markets: out };
+  return category ? out.filter(m => m.category === category).slice(0, want) : out.slice(0, want);
 }
 
 async function getPositions(wallet) {
@@ -121,7 +135,6 @@ module.exports = {
   getAccountInfo,
   listMarketsByStatus,
   getBettableMarkets,
-  countBettableByCategory,
   getCategories,
   getMarket,
   getPositions,
