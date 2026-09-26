@@ -1,38 +1,14 @@
 const { pantaClient } = require('./client');
 
-// ========== READ ENDPOINTS ==========
-
 async function getAccountInfo() {
   const response = await pantaClient.get('/account/');
   return response.data;
 }
 
-async function listMarkets({ category = null, limit = 50, cursor = null } = {}) {
-  const params = { limit };
-  if (category) params.category = category;
-  if (cursor) params.cursor = cursor;
-  const response = await pantaClient.get('/markets/', { params });
-  return {
-    items: response.data.items || [],
-    nextCursor: response.data.nextCursor || null,
-  };
-}
-
-async function listOpenMarkets(category, want = 10) {
-  const open = [];
-  let cursor = null;
-  let pages = 0;
-  while (open.length < want && pages < 5) {
-    const { items, nextCursor } = await listMarkets({ category, limit: 50, cursor });
-    for (const m of items) {
-      if (m.phase === 'primary' && m.status === 'open') open.push(m);
-      if (open.length >= want) break;
-    }
-    if (!nextCursor) break;
-    cursor = nextCursor;
-    pages++;
-  }
-  return open;
+// List markets by status. Valid status: primary | secondary | resolved | cancelled.
+async function listMarketsByStatus(status = 'primary', limit = 50) {
+  const response = await pantaClient.get('/markets/', { params: { status, limit } });
+  return response.data.items || [];
 }
 
 async function getCategories() {
@@ -45,12 +21,58 @@ async function getMarket(marketId) {
   return response.data;
 }
 
+// Fetch open (primary) markets, enrich each with detail (list returns empty
+// titles; detail has the real question + rule + category), keep only ones with
+// a real question and a live price.
+async function getBettableMarkets(category = null, want = 12) {
+  const primary = await listMarketsByStatus('primary', 50);
+  const out = [];
+  for (const m of primary) {
+    if (out.length >= want) break;
+    let detail;
+    try { detail = await getMarket(m.marketId); } catch (_) { continue; }
+    const question = (detail.question || detail.title || '').trim();
+    if (!question) continue;
+    const yes = detail.primaryYesPrice ?? m.primaryYesPrice;
+    if (yes == null) continue;
+    const cat = detail.category || m.category;
+    if (category && cat !== category) continue;
+    out.push({
+      marketId: m.marketId,
+      category: cat,
+      question,
+      description: (detail.description || '').trim(),
+      resolutionRule: (detail.resolutionRule || '').trim(),
+      yesPrice: yes,
+      noPrice: detail.primaryNoPrice ?? m.primaryNoPrice,
+      volumeUsdc: detail.totalVolumeUsdc || detail.volumeUsdc || m.volumeUsdc || '0',
+      endTime: detail.endTime || m.endTime,
+      phase: detail.phase || m.phase,
+      status: detail.status || m.status,
+    });
+  }
+  return out;
+}
+
+async function countBettableByCategory() {
+  const primary = await listMarketsByStatus('primary', 50);
+  const counts = {};
+  for (const m of primary) {
+    let detail;
+    try { detail = await getMarket(m.marketId); } catch (_) { continue; }
+    const question = (detail.question || detail.title || '').trim();
+    const yes = detail.primaryYesPrice ?? m.primaryYesPrice;
+    if (!question || yes == null) continue;
+    const cat = detail.category || m.category;
+    counts[cat] = (counts[cat] || 0) + 1;
+  }
+  return counts;
+}
+
 async function getPositions(wallet) {
   const response = await pantaClient.get('/positions/', { params: { wallet } });
   return response.data.items || response.data;
 }
-
-// ========== MARKET CREATION (quote -> build -> register) ==========
 
 async function quoteMarket({ wallet, question, resolutionRule, sourcesOfTruth, category, startTime, endTime, resolutionTime, title, description, imageUrl, region }) {
   const payload = {
@@ -71,8 +93,6 @@ async function registerMarket({ createId, signature }) {
   const response = await pantaClient.post('/markets/create/register/', { createId, signature });
   return response.data;
 }
-
-// ========== PRIMARY BUY / BETTING (quote -> build -> submit -> verify) ==========
 
 async function quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }) {
   const response = await pantaClient.post('/primaryorder/quote/', { wallet, marketId, side, amountUsdc, userId });
@@ -99,8 +119,9 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
 
 module.exports = {
   getAccountInfo,
-  listMarkets,
-  listOpenMarkets,
+  listMarketsByStatus,
+  getBettableMarkets,
+  countBettableByCategory,
   getCategories,
   getMarket,
   getPositions,
