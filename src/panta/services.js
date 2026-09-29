@@ -160,17 +160,17 @@ async function registerMarket({ createId, signature }) {
 // LIVE — always called fresh at bet time. Never cached. This is what
 // determines the real price and shares the user actually gets.
 async function quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }) {
-  const response = await pantaClient.post('/primaryorder/quote/', { wallet, marketId, side, amountUsdc, userId });
+  const response = await pantaClient.post('/primaryorderquote/', { wallet, marketId, side, amountUsdc, userId });
   return response.data;
 }
 
 async function buildPrimaryBuy({ quoteId, wallet, userId, maxSlippageBps }) {
-  const response = await pantaClient.post('/primaryorder/build/', { quoteId, wallet, userId, maxSlippageBps: maxSlippageBps || 100 });
+  const response = await pantaClient.post('/primaryorderbuild/', { quoteId, wallet, userId, maxSlippageBps: maxSlippageBps || 100 });
   return response.data;
 }
 
 async function submitPrimaryBuy({ orderId, signature, wallet }) {
-  const response = await pantaClient.post('/primaryorder/submit/', { orderId, signature, wallet });
+  const response = await pantaClient.post('/primaryordersubmit/', { orderId, signature, wallet });
   return response.data;
 }
 
@@ -178,7 +178,7 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
   const payload = { orderId };
   if (signature) payload.signature = signature;
   if (wallet) payload.wallet = wallet;
-  const response = await pantaClient.post('/primaryorder/verify/', payload);
+  const response = await pantaClient.post('/primaryorderverify/', payload);
   return response.data;
 }
 
