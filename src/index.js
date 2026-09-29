@@ -291,7 +291,7 @@ bot.action(/^pbet_(yes|no)_(.+)$/, async (ctx) => {
     const question = (m.question || m.title || 'this market').trim();
 
     userState[userId] = userState[userId] || {};
-    userState[userId].bet = { marketId, side, step: 'amount', title: question };
+    userState[userId].bet = { marketId, side, step: 'amount', title: question, endTime: m.endTime || null };
 
     try {
       await ctx.telegram.sendMessage(userId,
@@ -649,6 +649,7 @@ bot.action('confirm_bet', async (ctx) => {
       userId: user.id, telegramId: userId, marketId, side,
       amountUsdc: String(amount), shares: quote.shares, avgPrice: quote.avgPrice,
       feeUsdc: quote.feeUsdc, orderId: built.orderId, signature, status: finalStatus,
+      marketTitle: st.bet.title || null, marketEndTime: st.bet.endTime || null,
     });
 
     const betTitle = st.bet.title || 'market';
@@ -685,8 +686,16 @@ bot.action('my_bets', async (ctx) => {
     let msg = '📈 Your Bets:\n\n';
     if (!bets.length) msg += 'No bets yet. Use Browse Markets to place one.';
     else {
-      for (const b of bets.slice(0, 20)) {
-        msg += `• ${b.side.toUpperCase()} ${b.amount_usdc} USDC — ${b.status}\n`;
+      for (const b of bets.slice(0, 15)) {
+        const title = b.market_title || b.market_id;
+        const side = b.side === 'yes' ? 'YES ✅' : 'NO ❌';
+        const dateStr = b.market_end_time
+          ? new Date(Number(b.market_end_time) * 1000).toUTCString().replace(' GMT', '')
+          : null;
+        msg += `📊 ${title}\n`;
+        msg += `   ${side} • ${b.amount_usdc} USDC • ${b.shares || '?'} shares @ ${b.avg_price || '?'}\n`;
+        if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
+        msg += `   Status: ${b.status}\n\n`;
       }
     }
     await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'start_menu' }]] } });
@@ -863,6 +872,15 @@ async function startup() {
     await runMigrations();
     console.log('Clearing any stale connection...');
     try { await bot.telegram.deleteWebhook({ drop_pending_updates: true }); } catch (e) { console.log('deleteWebhook skipped:', e.message); }
+    console.log('Registering command menu...');
+    try {
+      await bot.telegram.setMyCommands([
+        { command: 'start', description: 'Open your wallet & main menu' },
+        { command: 'wallet', description: 'View your wallet, deposit or withdraw' },
+        { command: 'markets', description: 'Browse live markets & place bets' },
+        { command: 'createmarket', description: 'Create a new prediction market (in a group)' },
+      ]);
+    } catch (e) { console.log('setMyCommands skipped:', e.message); }
     console.log('Starting polling...');
     await bot.launch({ dropPendingUpdates: true });
     console.log('Bot polling started!');

@@ -41,6 +41,14 @@ async function runMigrations() {
       );
     `);
 
+    const betCols = [
+      `ADD COLUMN IF NOT EXISTS market_title TEXT`,
+      `ADD COLUMN IF NOT EXISTS market_end_time BIGINT`,
+    ];
+    for (const col of betCols) {
+      await client.query(`ALTER TABLE bets ${col};`);
+    }
+
     console.log('✓ Migrations applied');
   } catch (err) {
     console.error('Migration error:', err.message);

@@ -109,12 +109,13 @@ async function updateMarketVolume(marketId, volumeUsdc) {
 async function createBet(b) {
   const result = await pool.query(
     `INSERT INTO bets
-      (user_id, telegram_id, market_id, side, amount_usdc, shares, avg_price, fee_usdc, order_id, signature, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      (user_id, telegram_id, market_id, side, amount_usdc, shares, avg_price, fee_usdc, order_id, signature, status, market_title, market_end_time)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
      RETURNING *`,
     [
       b.userId, b.telegramId, b.marketId, b.side, b.amountUsdc,
       b.shares, b.avgPrice, b.feeUsdc, b.orderId, b.signature, b.status || 'submitted',
+      b.marketTitle || null, b.marketEndTime || null,
     ]
   );
   return result.rows[0];
