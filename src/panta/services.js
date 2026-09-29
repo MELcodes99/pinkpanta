@@ -19,9 +19,14 @@ async function getCategories() {
   return response.data.categories || [];
 }
 
-async function getMarket(marketId) {
-  const response = await pantaClient.get(`/markets/${marketId}/`);
-  return response.data;
+async function getMarket(marketId, retries = 1) {
+  try {
+    const response = await pantaClient.get(`/markets/${marketId}/`);
+    return response.data;
+  } catch (e) {
+    if (retries > 0) return getMarket(marketId, retries - 1);
+    throw e;
+  }
 }
 
 async function mapLimit(items, limit, fn) {
@@ -64,33 +69,50 @@ function shape(detail, listItem) {
   };
 }
 
-let _cache = { at: 0, markets: [] };
-const CACHE_MS = 60 * 1000;
+let _primCache = { at: 0, markets: [] };
+let _secCache = { at: 0, markets: [] };
+const CACHE_MS = 90 * 1000;
 
-async function getLiveMarkets(want = 15) {
+async function getPrimaryMarkets() {
   const now = Date.now();
-  if (now - _cache.at < CACHE_MS && _cache.markets.length) return _cache.markets.slice(0, want);
+  if (now - _primCache.at < CACHE_MS && _primCache.markets.length) return _primCache.markets;
 
-  const [primary, secondary] = await Promise.all([
-    listMarketsByStatus('primary', 50).catch(() => []),
-    listMarketsByStatus('secondary', 50).catch(() => []),
-  ]);
-
-  const primDetails = await mapLimit(primary.slice(0, 15), 5, (m) => getMarket(m.marketId));
-  const secDetails = await mapLimit(secondary.slice(0, 15), 5, (m) => getMarket(m.marketId));
-
+  const list = await listMarketsByStatus('primary', 50).catch(() => []);
+  const details = await mapLimit(list, 8, (m) => getMarket(m.marketId, 2));
   const out = [];
-  primary.slice(0, 15).forEach((m, i) => {
-    const s = shape(primDetails[i], m);
+  list.forEach((m, i) => {
+    const s = shape(details[i], m);
     if (s.question && s.bettable && s.yesPrice != null) out.push(s);
   });
-  secondary.slice(0, 15).forEach((m, i) => {
-    const s = shape(secDetails[i], m);
-    if (s.question && s.tradeable) out.push(s);
-  });
+  if (out.length) _primCache = { at: now, markets: out };
+  return out;
+}
 
-  _cache = { at: now, markets: out };
-  return out.slice(0, want);
+async function getSecondaryMarkets(need = 12) {
+  const now = Date.now();
+  if (now - _secCache.at < CACHE_MS && _secCache.markets.length) return _secCache.markets;
+
+  const list = await listMarketsByStatus('secondary', 50).catch(() => []);
+  const out = [];
+  for (let i = 0; i < list.length && out.length < need; i += 10) {
+    const batch = list.slice(i, i + 10);
+    const details = await mapLimit(batch, 10, (m) => getMarket(m.marketId, 1));
+    for (let k = 0; k < batch.length; k++) {
+      const s = shape(details[k], batch[k]);
+      if (s.question && s.tradeable) out.push(s);
+      if (out.length >= need) break;
+    }
+  }
+  if (out.length) _secCache = { at: now, markets: out };
+  return out;
+}
+
+async function getLiveMarkets(want = 20) {
+  const [prim, sec] = await Promise.all([
+    getPrimaryMarkets().catch(() => []),
+    getSecondaryMarkets(12).catch(() => []),
+  ]);
+  return [...prim, ...sec].slice(0, want);
 }
 
 async function getPositions(wallet) {
@@ -148,6 +170,8 @@ module.exports = {
   listMarketsByStatus,
   getCategories,
   getMarket,
+  getPrimaryMarkets,
+  getSecondaryMarkets,
   getLiveMarkets,
   getPositions,
   quoteMarket,
