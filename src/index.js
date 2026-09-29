@@ -225,10 +225,15 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery('Loading market...');
 
     let m;
-    try { m = await pantaGetMarket(marketId); }
-    catch (e) { await ctx.reply('Could not load that market. It may have closed.'); return; }
+    try { m = await pantaGetMarket(marketId, 2); }
+    catch (e) { await ctx.reply('Could not load that market. Try again in a moment.'); return; }
 
-    const question = (m.question || m.title || 'Untitled market').trim();
+    const question = (m.question || m.title || '').trim();
+    if (!question) {
+      await ctx.reply('This market has no data available right now. Try another one.',
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Markets', callback_data: 'browse_markets' }]] } });
+      return;
+    }
     const isPrimary = m.phase === 'primary' && m.status === 'primary';
     const isSecondary = m.phase === 'secondary';
     const y = parseFloat(m.primaryYesPrice);
@@ -282,7 +287,7 @@ bot.action(/^pbet_(yes|no)_(.+)$/, async (ctx) => {
     }
 
     let m;
-    try { m = await pantaGetMarket(marketId); } catch (_) { m = {}; }
+    try { m = await pantaGetMarket(marketId, 2); } catch (_) { m = {}; }
     const question = (m.question || m.title || 'this market').trim();
 
     userState[userId] = userState[userId] || {};
