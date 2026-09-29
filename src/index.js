@@ -20,7 +20,7 @@ const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal')
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getBettableMarkets, getMarket: pantaGetMarket,
+  getLiveMarkets, getMarket: pantaGetMarket, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -106,7 +106,7 @@ async function requirePrivateCb(ctx) {
 function initMarketCreation(userId, groupId, groupName) {
   return { userId, groupId, groupName, step: 'title',
     title: null, description: null, yesCondition: null, noCondition: null,
-    timezone: null, endTime: null };
+    timezone: null, endTime: null, endTimeText: null, marketType: null };
 }
 
 // ============================================================
@@ -139,7 +139,6 @@ bot.command('wallet', async (ctx) => {
   }
 });
 
-// /markets — works in group AND private
 bot.command('markets', async (ctx) => {
   try { await showMarkets(ctx); }
   catch (err) { console.error('ERROR /markets:', err.message); await ctx.reply('Error loading markets'); }
@@ -150,7 +149,6 @@ bot.command('viewmarket', async (ctx) => {
   catch (err) { console.error('ERROR /viewmarket:', err.message); await ctx.reply('Error loading markets'); }
 });
 
-// /createmarket — GROUP ONLY (flow runs in private chat)
 bot.command('createmarket', async (ctx) => {
   try {
     if (ctx.chat.type === 'private') {
@@ -179,15 +177,13 @@ bot.command('createmarket', async (ctx) => {
 });
 
 // ============================================================
-// MARKETS BROWSING (direct list -> detail -> bet)
+// MARKETS BROWSING
 // ============================================================
 
-// Show the list of bettable markets directly (Panta's list category data is
-// unreliable, so we skip a category step and just show what's bettable).
 async function showMarkets(ctx, edit = false) {
   let markets;
   try {
-    markets = await getBettableMarkets(null, 12);
+    markets = await getLiveMarkets(15);
   } catch (e) {
     const msg = 'Could not load markets right now. Try again shortly.';
     if (edit) { await ctx.editMessageText(msg); } else { await ctx.reply(msg); }
@@ -195,18 +191,20 @@ async function showMarkets(ctx, edit = false) {
   }
 
   if (!markets.length) {
-    const msg = 'No open markets available right now. Check back soon.';
+    const msg = 'No live markets available right now. Check back soon.';
     if (edit) { await ctx.editMessageText(msg); } else { await ctx.reply(msg); }
     return;
   }
 
   const rows = markets.map((m) => {
-    const yes = Math.round(parseFloat(m.yesPrice) * 100);
-    const q = m.question.length > 45 ? m.question.slice(0, 44) + '…' : m.question;
-    return [{ text: `${q} — YES ${yes}%`, callback_data: `mkt_${m.marketId}` }];
+    const q = m.question.length > 42 ? m.question.slice(0, 41) + '…' : m.question;
+    const tag = m.bettable
+      ? (m.yesPrice != null ? ` — YES ${Math.round(parseFloat(m.yesPrice) * 100)}%` : '')
+      : ' 🔗';
+    return [{ text: `${q}${tag}`, callback_data: `mkt_${m.marketId}` }];
   });
 
-  const header = '📊 Open markets — tap one to bet:';
+  const header = '📊 Live markets\n🟢 = bet here  |  🔗 = trade on Panta\n\nTap one:';
   if (edit) { await ctx.editMessageText(header, { reply_markup: { inline_keyboard: rows } }); }
   else { await ctx.reply(header, { reply_markup: { inline_keyboard: rows } }); }
 }
@@ -221,7 +219,6 @@ bot.action('browse_markets', async (ctx) => {
   }
 });
 
-// Market detail card with YES/NO
 bot.action(/^mkt_(.+)$/, async (ctx) => {
   try {
     const marketId = ctx.match[1];
@@ -232,29 +229,34 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
     catch (e) { await ctx.reply('Could not load that market. It may have closed.'); return; }
 
     const question = (m.question || m.title || 'Untitled market').trim();
+    const isPrimary = m.phase === 'primary' && m.status === 'primary';
+    const isSecondary = m.phase === 'secondary';
     const y = parseFloat(m.primaryYesPrice);
     const n = parseFloat(m.primaryNoPrice);
-    const pct = (!isNaN(y) && !isNaN(n) && (y + n) > 0)
+    const pct = (isPrimary && !isNaN(y) && !isNaN(n) && (y + n) > 0)
       ? { yes: Math.round(y * 100), no: Math.round(n * 100) } : null;
     const endStr = m.endTime ? new Date(Number(m.endTime) * 1000).toUTCString() : 'N/A';
     const vol = m.totalVolumeUsdc || m.volumeUsdc || '0';
     const rule = (m.resolutionRule || '').trim() || '—';
+    const url = SITE_BASE + marketId;
 
     let msg = `📊 ${question}\n\n`;
     if (m.description && m.description.trim()) msg += `${m.description}\n\n`;
     msg += `---\n`;
     msg += `💰 Volume: $${vol}\n`;
-    msg += pct ? `📈 YES: ${pct.yes}%  |  NO: ${pct.no}%\n` : `📈 Prices: not available yet\n`;
+    if (pct) msg += `📈 YES: ${pct.yes}%  |  NO: ${pct.no}%\n`;
     msg += `📋 Resolution:\n${rule}\n\n`;
     msg += `⏰ Ends: ${endStr}`;
 
-    const bettable = m.phase === 'primary' && m.status === 'open';
     const keyboard = { inline_keyboard: [] };
-    if (bettable) {
+    if (isPrimary && question) {
       keyboard.inline_keyboard.push([
         { text: '✅ Bet YES', callback_data: `pbet_yes_${marketId}` },
         { text: '❌ Bet NO', callback_data: `pbet_no_${marketId}` },
       ]);
+    } else if (isSecondary) {
+      msg += `\n\n🔗 This market is in secondary (P2P) trading. Trade it on Panta:`;
+      keyboard.inline_keyboard.push([{ text: '🔗 Trade on Panta', url }]);
     } else {
       msg += `\n\n⚠️ This market is not open for betting.`;
     }
@@ -267,7 +269,6 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
   }
 });
 
-// Bet YES/NO -> redirect to private chat for amount + approval
 bot.action(/^pbet_(yes|no)_(.+)$/, async (ctx) => {
   try {
     const side = ctx.match[1];
@@ -483,7 +484,7 @@ bot.action('decline_withdrawal', async (ctx) => {
 });
 
 // ============================================================
-// MARKET CREATION FLOW (runs in private chat)
+// MARKET CREATION FLOW
 // ============================================================
 
 bot.action('tz_utc', async (ctx) => {
@@ -500,6 +501,40 @@ bot.action('tz_wat', async (ctx) => {
   ctx.session.marketCreation.step = 'time';
   await ctx.reply('Enter the market END date & time in WAT (Lagos).\n\nFormat: YYYY-MM-DD HH:MM\nExample: 2027-01-01 16:00');
   await ctx.answerCbQuery();
+});
+
+async function showCreateVerify(ctx) {
+  const mc = ctx.session.marketCreation;
+  if (!mc) { await ctx.answerCbQuery('Session expired', true); return; }
+  const user = await getUser(ctx.from.id);
+  const fee = mc.marketType === 'standard' ? '$50' : '$20';
+  const typeName = mc.marketType === 'standard' ? 'Standard' : 'Breaking';
+  const preview =
+    `📋 Verify Market\n\n` +
+    `Title: ${mc.title}\n` +
+    `Description: ${mc.description}\n\n` +
+    `This market will resolve YES if: ${mc.yesCondition}\n` +
+    `This market will resolve NO if: ${mc.noCondition}\n\n` +
+    `⏰ Ends: ${mc.endTimeText} ${mc.timezone}\n` +
+    `🏷️ Type: ${typeName} (${fee} USDC fee)\n` +
+    `👤 Created by: @${user.username || 'you'}`;
+  await ctx.editMessageText(preview, { reply_markup: { inline_keyboard: [
+    [{ text: `✅ Create (${fee})`, callback_data: 'confirm_market_creation' }],
+    [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+  ]}});
+  await ctx.answerCbQuery();
+}
+
+bot.action('mtype_breaking', async (ctx) => {
+  if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
+  ctx.session.marketCreation.marketType = 'breaking';
+  await showCreateVerify(ctx);
+});
+
+bot.action('mtype_standard', async (ctx) => {
+  if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
+  ctx.session.marketCreation.marketType = 'standard';
+  await showCreateVerify(ctx);
 });
 
 bot.action('cancel_market_creation', async (ctx) => {
@@ -519,10 +554,9 @@ bot.action('confirm_market_creation', async (ctx) => {
     const keypair = decryptKeypair(user.encrypted_keypair);
     const wallet = user.wallet_address;
 
-    const now = Math.floor(Date.now() / 1000);
-    const startTime = Math.max(mc.endTime - 7 * 24 * 3600, now + 2 * 3600);
     const endTime = mc.endTime;
-    const resolutionTime = endTime + 2 * 3600;
+    const startTime = Math.floor(Date.now() / 1000);
+    const resolutionTime = endTime + 3600;
 
     const resolutionRule = `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`;
 
@@ -530,13 +564,16 @@ bot.action('confirm_market_creation', async (ctx) => {
       wallet,
       question: mc.title,
       resolutionRule,
-      sourcesOfTruth: ['https://www.coingecko.com'],
+      sourcesOfTruth: ['https://www.google.com'],
       category: 'other',
-      startTime, endTime, resolutionTime,
+      startTime,
+      endTime,
+      resolutionTime,
       title: mc.title,
       description: mc.description,
       imageUrl: DEFAULT_MARKET_IMAGE,
       region: 'Global',
+      marketType: mc.marketType || 'breaking',
     });
 
     await ctx.editMessageText('⏳ Creating market on Panta...\n\n2/4 Building transaction...');
@@ -549,7 +586,14 @@ bot.action('confirm_market_creation', async (ctx) => {
     const registered = await registerMarket({ createId: quote.createId, signature });
     const marketId = registered.marketId;
 
-    await ctx.editMessageText(`✅ Market Created & Live!\n\n📊 ${mc.title}\n\nMarket ID: \`${marketId}\`\nTX: \`${signature}\``, { parse_mode: 'Markdown' });
+    const url = SITE_BASE + marketId;
+    await ctx.editMessageText(`✅ Market Created & Live!\n\n📊 ${mc.title}\n\nMarket ID: \`${marketId}\`\nTX: \`${signature}\``, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [{ text: '✅ Bet YES', callback_data: `pbet_yes_${marketId}` }, { text: '❌ Bet NO', callback_data: `pbet_no_${marketId}` }],
+        [{ text: '🔗 View on Panta', url }],
+      ]},
+    });
 
     await ctx.telegram.sendMessage(mc.groupId,
       `🎉 New Market is LIVE!\n\n📊 ${mc.title}\n\n${mc.description}\n\nCreated by @${user.username || 'someone'}\n\nUse /markets to find and bet!`);
@@ -660,7 +704,7 @@ bot.action('start_menu', async (ctx) => {
 });
 
 // ============================================================
-// SINGLE TEXT HANDLER (all multi-step flows, private only)
+// SINGLE TEXT HANDLER (private only)
 // ============================================================
 
 bot.on('text', async (ctx) => {
@@ -777,22 +821,18 @@ bot.on('text', async (ctx) => {
         let utcMs = Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, 0);
         if (mc.timezone === 'WAT') utcMs -= 3600 * 1000;
         const endTime = Math.floor(utcMs / 1000);
-        if (endTime <= Math.floor(Date.now() / 1000) + 3 * 3600) { await ctx.reply('❌ End time must be at least a few hours in the future.'); return; }
+        if (endTime <= Math.floor(Date.now() / 1000)) { await ctx.reply('❌ End time must be in the future.'); return; }
         mc.endTime = endTime;
+        mc.endTimeText = text;
+        mc.step = 'markettype';
 
-        const user = await getUser(userId);
-        const preview =
-          `📋 Verify Market\n\n` +
-          `Title: ${mc.title}\n` +
-          `Description: ${mc.description}\n\n` +
-          `This market will resolve YES if: ${mc.yesCondition}\n` +
-          `This market will resolve NO if: ${mc.noCondition}\n\n` +
-          `⏰ Ends: ${text} ${mc.timezone}\n` +
-          `👤 Created by: @${user.username || 'you'}`;
-        await ctx.reply(preview, { reply_markup: { inline_keyboard: [
-          [{ text: '✅ Create', callback_data: 'confirm_market_creation' }],
-          [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
-        ]}});
+        await ctx.reply(
+          'Choose the market type:\n\n⚡ Breaking — $20 USDC fee\n📊 Standard — $50 USDC fee\n\n(Both need a little SOL for gas)',
+          { reply_markup: { inline_keyboard: [
+            [{ text: '⚡ Breaking ($20)', callback_data: 'mtype_breaking' }],
+            [{ text: '📊 Standard ($50)', callback_data: 'mtype_standard' }],
+            [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+          ]}});
         return;
       }
     }

@@ -1,13 +1,16 @@
 const { pantaClient } = require('./client');
 
+const SITE_BASE = 'https://panta.market/market/';
+
 async function getAccountInfo() {
   const response = await pantaClient.get('/account/');
   return response.data;
 }
 
-// List markets by status. Valid status: primary | secondary | resolved | cancelled.
-async function listMarketsByStatus(status = 'primary', limit = 50) {
-  const response = await pantaClient.get('/markets/', { params: { status, limit } });
+async function listMarketsByStatus(status, limit = 50) {
+  const params = { limit };
+  if (status) params.status = status;
+  const response = await pantaClient.get('/markets/', { params });
   return response.data.items || [];
 }
 
@@ -21,11 +24,6 @@ async function getMarket(marketId) {
   return response.data;
 }
 
-// ---- 60s cache for the bettable-markets list ----
-let _cache = { at: 0, markets: [] };
-const CACHE_MS = 60 * 1000;
-
-// small helper: run promises with limited concurrency (avoid rate limits)
 async function mapLimit(items, limit, fn) {
   const results = [];
   let i = 0;
@@ -40,47 +38,59 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
-// Fetch open (primary) markets, enrich in parallel (limited concurrency) with
-// detail to get the real question/price, keep only ones with a question + price.
-// Cached for 60s so repeat opens are instant.
-async function getBettableMarkets(category = null, want = 12) {
-  const now = Date.now();
-  if (now - _cache.at < CACHE_MS && _cache.markets.length) {
-    return category ? _cache.markets.filter(m => m.category === category).slice(0, want)
-                    : _cache.markets.slice(0, want);
-  }
+function shape(detail, listItem) {
+  const m = detail || {};
+  const question = (m.question || m.title || '').trim();
+  const isPrimary = m.phase === 'primary' && m.status === 'primary';
+  const isSecondary = m.phase === 'secondary';
+  const yes = isPrimary ? m.primaryYesPrice : null;
+  const no = isPrimary ? m.primaryNoPrice : null;
+  return {
+    marketId: m.marketId || (listItem && listItem.marketId),
+    category: m.category || (listItem && listItem.category),
+    question,
+    description: (m.description || '').trim(),
+    resolutionRule: (m.resolutionRule || '').trim(),
+    yesPrice: yes,
+    noPrice: no,
+    volumeUsdc: m.totalVolumeUsdc || m.volumeUsdc || '0',
+    endTime: m.endTime,
+    phase: m.phase,
+    status: m.status,
+    resolved: !!m.resolved,
+    bettable: isPrimary && !!question,
+    tradeable: isSecondary,
+    url: SITE_BASE + (m.marketId || (listItem && listItem.marketId)),
+  };
+}
 
-  const primary = await listMarketsByStatus('primary', 50);
-  // enrich the first ~20 in parallel, 5 at a time
-  const candidates = primary.slice(0, 20);
-  const details = await mapLimit(candidates, 5, (m) => getMarket(m.marketId));
+let _cache = { at: 0, markets: [] };
+const CACHE_MS = 60 * 1000;
+
+async function getLiveMarkets(want = 15) {
+  const now = Date.now();
+  if (now - _cache.at < CACHE_MS && _cache.markets.length) return _cache.markets.slice(0, want);
+
+  const [primary, secondary] = await Promise.all([
+    listMarketsByStatus('primary', 50).catch(() => []),
+    listMarketsByStatus('secondary', 50).catch(() => []),
+  ]);
+
+  const primDetails = await mapLimit(primary.slice(0, 15), 5, (m) => getMarket(m.marketId));
+  const secDetails = await mapLimit(secondary.slice(0, 15), 5, (m) => getMarket(m.marketId));
 
   const out = [];
-  for (let k = 0; k < candidates.length; k++) {
-    const m = candidates[k];
-    const detail = details[k];
-    if (!detail) continue;
-    const question = (detail.question || detail.title || '').trim();
-    if (!question) continue;
-    const yes = detail.primaryYesPrice ?? m.primaryYesPrice;
-    if (yes == null) continue;
-    out.push({
-      marketId: m.marketId,
-      category: detail.category || m.category,
-      question,
-      description: (detail.description || '').trim(),
-      resolutionRule: (detail.resolutionRule || '').trim(),
-      yesPrice: yes,
-      noPrice: detail.primaryNoPrice ?? m.primaryNoPrice,
-      volumeUsdc: detail.totalVolumeUsdc || detail.volumeUsdc || m.volumeUsdc || '0',
-      endTime: detail.endTime || m.endTime,
-      phase: detail.phase || m.phase,
-      status: detail.status || m.status,
-    });
-  }
+  primary.slice(0, 15).forEach((m, i) => {
+    const s = shape(primDetails[i], m);
+    if (s.question && s.bettable && s.yesPrice != null) out.push(s);
+  });
+  secondary.slice(0, 15).forEach((m, i) => {
+    const s = shape(secDetails[i], m);
+    if (s.question && s.tradeable) out.push(s);
+  });
 
   _cache = { at: now, markets: out };
-  return category ? out.filter(m => m.category === category).slice(0, want) : out.slice(0, want);
+  return out.slice(0, want);
 }
 
 async function getPositions(wallet) {
@@ -88,10 +98,11 @@ async function getPositions(wallet) {
   return response.data.items || response.data;
 }
 
-async function quoteMarket({ wallet, question, resolutionRule, sourcesOfTruth, category, startTime, endTime, resolutionTime, title, description, imageUrl, region }) {
+async function quoteMarket({ wallet, question, resolutionRule, sourcesOfTruth, category, startTime, endTime, resolutionTime, title, description, imageUrl, region, marketType }) {
   const payload = {
     wallet, question, resolutionRule, sourcesOfTruth, category,
-    startTime, endTime, resolutionTime, marketType: 'standard',
+    startTime, endTime, resolutionTime,
+    marketType: marketType || 'standard',
     title, description, imageUrl, region: region || 'Global',
   };
   const response = await pantaClient.post('/markets/create/quote/', payload);
@@ -132,11 +143,12 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
 }
 
 module.exports = {
+  SITE_BASE,
   getAccountInfo,
   listMarketsByStatus,
-  getBettableMarkets,
   getCategories,
   getMarket,
+  getLiveMarkets,
   getPositions,
   quoteMarket,
   buildCreateTransaction,
