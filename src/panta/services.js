@@ -159,9 +159,18 @@ async function registerMarket({ createId, signature }) {
 
 // LIVE — always called fresh at bet time. Never cached. This is what
 // determines the real price and shares the user actually gets.
-async function quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }) {
-  const response = await pantaClient.post('/primaryorderquote/', { wallet, marketId, side, amountUsdc, userId });
-  return response.data;
+async function quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }, retries = 2) {
+  try {
+    const response = await pantaClient.post('/primaryorderquote/', { wallet, marketId, side, amountUsdc, userId });
+    return response.data;
+  } catch (e) {
+    const code = e.response?.data?.code;
+    if (retries > 0 && code === 'INVALID_MARKET_PARAMS') {
+      await new Promise(r => setTimeout(r, 800));
+      return quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }, retries - 1);
+    }
+    throw e;
+  }
 }
 
 async function buildPrimaryBuy({ quoteId, wallet, userId, maxSlippageBps }) {
