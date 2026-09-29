@@ -20,7 +20,7 @@ const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal')
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getMarket: pantaGetMarket, SITE_BASE,
+  getLiveMarkets, getCachedMarket, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -225,7 +225,7 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery('Loading market...');
 
     let m;
-    try { m = await pantaGetMarket(marketId, 2); }
+    try { m = await getCachedMarket(marketId); }
     catch (e) { await ctx.reply('Could not load that market. Try again in a moment.'); return; }
 
     const question = (m.question || m.title || '').trim();
@@ -287,7 +287,7 @@ bot.action(/^pbet_(yes|no)_(.+)$/, async (ctx) => {
     }
 
     let m;
-    try { m = await pantaGetMarket(marketId, 2); } catch (_) { m = {}; }
+    try { m = await getCachedMarket(marketId); } catch (_) { m = {}; }
     const question = (m.question || m.title || 'this market').trim();
 
     userState[userId] = userState[userId] || {};

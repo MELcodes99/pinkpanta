@@ -115,6 +115,22 @@ async function getLiveMarkets(want = 20) {
   return [...prim, ...sec].slice(0, want);
 }
 
+// DISPLAY ONLY — used when a user taps a market card. Prefers the data we
+// already fetched for the list (Panta's detail endpoint is inconsistent and
+// can return an empty record moments later for the same market). Never used
+// for the bet itself — quotePrimaryBuy below always calls Panta fresh.
+async function getCachedMarket(marketId) {
+  const cached = [..._primCache.markets, ..._secCache.markets].find(m => m.marketId === marketId);
+  if (cached && cached.question) return cached;
+  try {
+    const d = await getMarket(marketId, 2);
+    const s = shape(d, { marketId });
+    return s.question ? s : (cached || s);
+  } catch (_) {
+    return cached || null;
+  }
+}
+
 async function getPositions(wallet) {
   const response = await pantaClient.get('/positions/', { params: { wallet } });
   return response.data.items || response.data;
@@ -141,6 +157,8 @@ async function registerMarket({ createId, signature }) {
   return response.data;
 }
 
+// LIVE — always called fresh at bet time. Never cached. This is what
+// determines the real price and shares the user actually gets.
 async function quotePrimaryBuy({ wallet, marketId, side, amountUsdc, userId }) {
   const response = await pantaClient.post('/primaryorder/quote/', { wallet, marketId, side, amountUsdc, userId });
   return response.data;
@@ -173,6 +191,7 @@ module.exports = {
   getPrimaryMarkets,
   getSecondaryMarkets,
   getLiveMarkets,
+  getCachedMarket,
   getPositions,
   quoteMarket,
   buildCreateTransaction,
