@@ -708,23 +708,23 @@ bot.action('cancel_bet', async (ctx) => {
 bot.action('my_bets', async (ctx) => {
   try {
     if (!(await requirePrivateCb(ctx))) return;
-    await ctx.answerCbQuery('Loading your bets...');
+    await ctx.answerCbQuery();
 
     const bets = await getUserBets(ctx.from.id);
 
-    // Check unresolved bets against Panta and update their status
-    for (const b of bets) {
-      if (b.status === 'submitted') {
-        try {
-          const result = await checkMarketResult(b.market_id);
-          if (result.resolved) {
-            const won = (b.side === 'yes' && result.yesWins) || (b.side === 'no' && !result.yesWins);
-            await updateBetStatus(b.order_id, won ? 'won' : 'lost');
-            b.status = won ? 'won' : 'lost';
-          }
-        } catch (_) {}
-      }
-    }
+    // Check unresolved bets against Panta and update their status.
+    // Run in parallel so it doesn't block the display.
+    await Promise.all(bets.map(async (b) => {
+      if (b.status !== 'submitted') return;
+      try {
+        const result = await checkMarketResult(b.market_id);
+        if (result.resolved) {
+          const won = (b.side === 'yes' && result.yesWins) || (b.side === 'no' && !result.yesWins);
+          await updateBetStatus(b.order_id, won ? 'won' : 'lost');
+          b.status = won ? 'won' : 'lost';
+        }
+      } catch (_) {}
+    }));
 
     // Compute stats
     const total = bets.length;
