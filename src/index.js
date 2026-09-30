@@ -105,7 +105,7 @@ async function requirePrivateCb(ctx) {
 
 function initMarketCreation(userId, groupId, groupName) {
   return { userId, groupId, groupName, step: 'title',
-    title: null, description: null, yesCondition: null, noCondition: null,
+    title: null, description: null, category: null, yesCondition: null, noCondition: null,
     timezone: null, endTime: null, endTimeText: null, marketType: null };
 }
 
@@ -498,6 +498,15 @@ bot.action('decline_withdrawal', async (ctx) => {
 // MARKET CREATION FLOW
 // ============================================================
 
+bot.action(/^mcat_(sports|crypto|finance|science|world)$/, async (ctx) => {
+  if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
+  const mc = ctx.session.marketCreation;
+  mc.category = ctx.match[1];
+  mc.step = 'yesCondition';
+  await ctx.reply('Step 4 of 6: Complete this line —\n\n"This market will resolve YES if: ..."');
+  await ctx.answerCbQuery(`Category: ${mc.category}`);
+});
+
 bot.action('tz_utc', async (ctx) => {
   if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
   ctx.session.marketCreation.timezone = 'UTC';
@@ -570,13 +579,22 @@ bot.action('confirm_market_creation', async (ctx) => {
     const resolutionTime = endTime + 3600;
 
     const resolutionRule = `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`;
+    const category = mc.category || 'crypto';
+    const sourceByCategory = {
+      crypto: 'https://www.coingecko.com',
+      sports: 'https://www.espn.com',
+      finance: 'https://www.bloomberg.com',
+      science: 'https://www.nature.com',
+      world: 'https://www.reuters.com',
+    };
+    const sourcesOfTruth = [sourceByCategory[category] || 'https://www.coingecko.com'];
 
     const quote = await quoteMarket({
       wallet,
       question: mc.title,
       resolutionRule,
-      sourcesOfTruth: ['https://www.coingecko.com'],
-      category: 'crypto',
+      sourcesOfTruth,
+      category,
       startTime,
       endTime,
       resolutionTime,
@@ -818,18 +836,23 @@ bot.on('text', async (ctx) => {
         return;
       }
       if (mc.step === 'description') {
-        mc.description = text; mc.step = 'yesCondition';
-        await ctx.reply('Step 3 of 5: Complete this line —\n\n"This market will resolve YES if: ..."');
+        mc.description = text; mc.step = 'category';
+        await ctx.reply('Step 3 of 6: Choose a category:', { reply_markup: { inline_keyboard: [
+          [{ text: '⚽ Sports', callback_data: 'mcat_sports' }, { text: '₿ Crypto', callback_data: 'mcat_crypto' }],
+          [{ text: '💰 Finance', callback_data: 'mcat_finance' }, { text: '🔬 Science', callback_data: 'mcat_science' }],
+          [{ text: '🌍 World', callback_data: 'mcat_world' }],
+          [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
+        ]}});
         return;
       }
       if (mc.step === 'yesCondition') {
         mc.yesCondition = text.replace(/^this market will resolve yes if:?\s*/i, ''); mc.step = 'noCondition';
-        await ctx.reply('Step 4 of 5: Complete this line —\n\n"This market will resolve NO if: ..."');
+        await ctx.reply('Step 5 of 6: Complete this line —\n\n"This market will resolve NO if: ..."');
         return;
       }
       if (mc.step === 'noCondition') {
         mc.noCondition = text.replace(/^this market will resolve no if:?\s*/i, ''); mc.step = 'timezone';
-        await ctx.reply('Step 5 of 5: Choose the timezone for the market END time:',
+        await ctx.reply('Step 6 of 6: Choose the timezone for the market END time:',
           { reply_markup: { inline_keyboard: [
             [{ text: 'UTC', callback_data: 'tz_utc' }, { text: 'WAT (Lagos)', callback_data: 'tz_wat' }],
             [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
