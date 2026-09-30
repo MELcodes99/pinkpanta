@@ -151,24 +151,30 @@ bot.command('viewmarket', async (ctx) => {
 
 bot.command('createmarket', async (ctx) => {
   try {
-    if (ctx.chat.type === 'private') {
-      await ctx.reply('Use /createmarket inside a group to create a prediction market.');
-      return;
-    }
     const userId = ctx.from.id;
+    const isPrivate = ctx.chat.type === 'private';
     const user = await getUser(userId);
     if (!user || !user.wallet_address) {
       await ctx.reply(`You need a wallet first. Open a private chat with @${BOT_USERNAME} and use /start to create one.`);
       return;
     }
-    ctx.session.marketCreation = initMarketCreation(userId, ctx.chat.id, ctx.chat.title || 'Group');
-    try {
-      await ctx.telegram.sendMessage(userId,
+    const groupId = isPrivate ? null : ctx.chat.id;
+    const groupName = isPrivate ? null : (ctx.chat.title || 'Group');
+    ctx.session.marketCreation = initMarketCreation(userId, groupId, groupName);
+
+    if (isPrivate) {
+      await ctx.reply(
         '📊 Create Prediction Market\n\nStep 1 of 5: Send the market TITLE\n\n(Short, e.g. "ETH above $5k by Jan 2027")',
         { reply_markup: { inline_keyboard: [[{ text: 'Cancel', callback_data: 'cancel_market_creation' }]] } });
-      await ctx.reply('📨 I sent you a private message to set up the market. Continue there.');
-    } catch (e) {
-      await ctx.reply(`⚠️ I could not DM you. Open a private chat with @${BOT_USERNAME} first (tap the name → Start), then run /createmarket again.`);
+    } else {
+      try {
+        await ctx.telegram.sendMessage(userId,
+          '📊 Create Prediction Market\n\nStep 1 of 5: Send the market TITLE\n\n(Short, e.g. "ETH above $5k by Jan 2027")',
+          { reply_markup: { inline_keyboard: [[{ text: 'Cancel', callback_data: 'cancel_market_creation' }]] } });
+        await ctx.reply('📨 I sent you a private message to set up the market. Continue there.');
+      } catch (e) {
+        await ctx.reply(`⚠️ I could not DM you. Open a private chat with @${BOT_USERNAME} first (tap the name → Start), then run /createmarket again.`);
+      }
     }
   } catch (err) {
     console.error('ERROR /createmarket:', err.message);
@@ -600,8 +606,10 @@ bot.action('confirm_market_creation', async (ctx) => {
       ]},
     });
 
-    await ctx.telegram.sendMessage(mc.groupId,
-      `🎉 New Market is LIVE!\n\n📊 ${mc.title}\n\n${mc.description}\n\nCreated by @${user.username || 'someone'}\n\nUse /markets to find and bet!`);
+    if (mc.groupId) {
+      await ctx.telegram.sendMessage(mc.groupId,
+        `🎉 New Market is LIVE!\n\n📊 ${mc.title}\n\n${mc.description}\n\nCreated by @${user.username || 'someone'}\n\nUse /markets to find and bet!`);
+    }
 
     delete ctx.session.marketCreation;
     await ctx.answerCbQuery('Market created');
