@@ -131,6 +131,20 @@ async function getCachedMarket(marketId) {
   }
 }
 
+// Check whether a market has resolved and which side won.
+// Returns { resolved: boolean, yesWins: boolean|null }.
+async function checkMarketResult(marketId) {
+  try {
+    const m = await getMarket(marketId, 2);
+    if (m && m.resolved && m.status === 'resolved') {
+      return { resolved: true, yesWins: !!m.yesWins };
+    }
+    return { resolved: false, yesWins: null };
+  } catch (_) {
+    return { resolved: false, yesWins: null };
+  }
+}
+
 async function getPositions(wallet) {
   const response = await pantaClient.get('/positions/', { params: { wallet } });
   return response.data.items || response.data;
@@ -201,6 +215,7 @@ module.exports = {
   getSecondaryMarkets,
   getLiveMarkets,
   getCachedMarket,
+  checkMarketResult,
   getPositions,
   quoteMarket,
   buildCreateTransaction,

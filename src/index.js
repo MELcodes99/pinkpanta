@@ -14,13 +14,13 @@ const {
 } = require('./solana/transactions');
 const {
   getOrCreateUser, getUser, updateUserWallet, deleteUserWallet,
-  createBet, getUserBets,
+  createBet, getUserBets, updateBetStatus,
 } = require('./db/queries');
 const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -708,22 +708,57 @@ bot.action('cancel_bet', async (ctx) => {
 bot.action('my_bets', async (ctx) => {
   try {
     if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery('Loading your bets...');
+
     const bets = await getUserBets(ctx.from.id);
-    let msg = '📈 Your Bets:\n\n';
-    if (!bets.length) msg += 'No bets yet. Use Browse Markets to place one.';
-    else {
-      for (const b of bets.slice(0, 15)) {
+
+    // Check unresolved bets against Panta and update their status
+    for (const b of bets) {
+      if (b.status === 'submitted') {
+        try {
+          const result = await checkMarketResult(b.market_id);
+          if (result.resolved) {
+            const won = (b.side === 'yes' && result.yesWins) || (b.side === 'no' && !result.yesWins);
+            await updateBetStatus(b.order_id, won ? 'won' : 'lost');
+            b.status = won ? 'won' : 'lost';
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Compute stats
+    const total = bets.length;
+    const volume = bets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
+    const won = bets.filter(b => b.status === 'won').length;
+    const lost = bets.filter(b => b.status === 'lost').length;
+    const settled = won + lost;
+    const winPct = settled > 0 ? Math.round((won / settled) * 100) : null;
+
+    let msg = '📈 Your Bets\n\n';
+    msg += '━━━━━━━━━━━━━━━\n';
+    msg += `🎯 Total Bets: ${total}\n`;
+    msg += `💰 Volume: $${volume.toFixed(2)} USDC\n`;
+    msg += `✅ Won: ${won}  |  ❌ Lost: ${lost}\n`;
+    msg += winPct !== null ? `📊 Win Rate: ${winPct}%\n` : `📊 Win Rate: — (no resolved bets yet)\n`;
+    msg += '━━━━━━━━━━━━━━━\n\n';
+
+    if (!bets.length) {
+      msg += 'No bets yet. Use Browse Markets to place one.';
+    } else {
+      for (const b of bets.slice(0, 10)) {
         const title = b.market_title || b.market_id;
         const side = b.side === 'yes' ? 'YES ✅' : 'NO ❌';
+        const statusEmoji = b.status === 'won' ? '🏆' : b.status === 'lost' ? '❌' : '⏳';
         const dateStr = b.market_end_time
           ? new Date(Number(b.market_end_time) * 1000).toUTCString().replace(' GMT', '')
           : null;
-        msg += `📊 ${title}\n`;
-        msg += `   ${side} • ${b.amount_usdc} USDC • ${b.shares || '?'} shares @ ${b.avg_price || '?'}\n`;
+        msg += `${statusEmoji} ${title}\n`;
+        msg += `   ${side} • $${b.amount_usdc} USDC • ${b.shares || '?'} shares\n`;
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
         msg += `   Status: ${b.status}\n\n`;
       }
     }
+
     await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'start_menu' }]] } });
   } catch (err) {
     console.error('ERROR my_bets:', err.message);
