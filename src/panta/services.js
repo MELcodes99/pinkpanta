@@ -1,4 +1,6 @@
 const { pantaClient } = require('./client');
+const FormData = require('form-data');
+const axios = require('axios');
 
 const SITE_BASE = 'https://panta.market/market/';
 
@@ -131,6 +133,29 @@ async function getCachedMarket(marketId) {
   }
 }
 
+// Upload an image to Cloudinary via Panta's signed upload endpoint.
+// imageBuffer: a Buffer of the image bytes.
+// Returns the Cloudinary secure_url to use as imageUrl in the market quote.
+async function uploadMarketImage(imageBuffer, filename) {
+  // Step 1: get signed upload fields from Panta
+  const sigRes = await pantaClient.post('/markets/create/image-upload/', {});
+  const { uploadUrl, fields } = sigRes.data;
+
+  // Step 2: build multipart form with signed fields + image file
+  const form = new FormData();
+  Object.entries(fields).forEach(([k, v]) => form.append(k, String(v)));
+  form.append('file', imageBuffer, { filename: filename || 'market.jpg', contentType: 'image/jpeg' });
+
+  // Step 3: POST directly to Cloudinary (image bytes never go through Panta)
+  const uploadRes = await axios.post(uploadUrl, form, {
+    headers: form.getHeaders(),
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+
+  return uploadRes.data.secure_url;
+}
+
 // Check whether a market has resolved and which side won.
 // Returns { resolved: boolean, yesWins: boolean|null }.
 async function checkMarketResult(marketId) {
@@ -216,6 +241,7 @@ module.exports = {
   getLiveMarkets,
   getCachedMarket,
   checkMarketResult,
+  uploadMarketImage,
   getPositions,
   quoteMarket,
   buildCreateTransaction,

@@ -20,7 +20,7 @@ const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal')
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, checkMarketResult, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -84,7 +84,7 @@ function startKeyboard(hasWallet) {
 }
 
 function greetingText(username) {
-  return `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Community Prediction Markets, powered by Panta, live on Solana.`;
+  return `Hello @${username}, welcome to PinkPanta!\n\nCreate and Participate in Panta Prediction Markets, powered by Panta, live on Solana.`;
 }
 
 async function requirePrivate(ctx) {
@@ -105,7 +105,7 @@ async function requirePrivateCb(ctx) {
 
 function initMarketCreation(userId, groupId, groupName) {
   return { userId, groupId, groupName, step: 'title',
-    title: null, description: null, category: null, yesCondition: null, noCondition: null,
+    title: null, description: null, category: null, imageUrl: null, yesCondition: null, noCondition: null,
     timezone: null, endTime: null, endTimeText: null, marketType: null };
 }
 
@@ -498,12 +498,27 @@ bot.action('decline_withdrawal', async (ctx) => {
 // MARKET CREATION FLOW
 // ============================================================
 
+// Skip image — use default PinkPanta image
+bot.action('mc_skip_image', async (ctx) => {
+  if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
+  const mc = ctx.session.marketCreation;
+  mc.imageUrl = null; // will fall back to DEFAULT_MARKET_IMAGE in quote
+  mc.step = 'category';
+  await ctx.editMessageText('Step 4 of 7: Choose a category:', { reply_markup: { inline_keyboard: [
+    [{ text: '⚽ Sports', callback_data: 'mcat_sports' }, { text: '₿ Crypto', callback_data: 'mcat_crypto' }],
+    [{ text: '💰 Finance', callback_data: 'mcat_finance' }, { text: '🔬 Science', callback_data: 'mcat_science' }],
+    [{ text: '🌍 World', callback_data: 'mcat_world' }],
+    [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+  ]}});
+  await ctx.answerCbQuery();
+});
+
 bot.action(/^mcat_(sports|crypto|finance|science|world)$/, async (ctx) => {
   if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
   const mc = ctx.session.marketCreation;
   mc.category = ctx.match[1];
   mc.step = 'yesCondition';
-  await ctx.reply('Step 4 of 6: Complete this line —\n\n"This market will resolve YES if: ..."');
+  await ctx.reply('Step 5 of 7: Complete this line —\n\n"This market will resolve YES if: ..."');
   await ctx.answerCbQuery(`Category: ${mc.category}`);
 });
 
@@ -600,7 +615,7 @@ bot.action('confirm_market_creation', async (ctx) => {
       resolutionTime,
       title: mc.title,
       description: mc.description,
-      imageUrl: DEFAULT_MARKET_IMAGE,
+      imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
       region: 'Global',
       marketType: mc.marketType || 'breaking',
     });
@@ -782,6 +797,41 @@ bot.action('start_menu', async (ctx) => {
 // SINGLE TEXT HANDLER (private only)
 // ============================================================
 
+// Handle photo uploads during market creation image step
+bot.on('photo', async (ctx) => {
+  const mc = ctx.session && ctx.session.marketCreation;
+  if (!mc || mc.step !== 'image') return;
+  try {
+    await ctx.reply('⏳ Uploading your image...');
+    // Get the largest photo size Telegram provides
+    const photos = ctx.message.photo;
+    const photo = photos[photos.length - 1];
+    const fileLink = await ctx.telegram.getFileLink(photo.file_id);
+    // Download the image as a buffer
+    const imgRes = await require('axios').get(fileLink.href, { responseType: 'arraybuffer' });
+    const imageBuffer = Buffer.from(imgRes.data);
+    // Upload to Cloudinary via Panta
+    const imageUrl = await uploadMarketImage(imageBuffer, 'market.jpg');
+    mc.imageUrl = imageUrl;
+    mc.step = 'category';
+    await ctx.reply('✅ Image uploaded! Now Step 4 of 7: Choose a category:', {
+      reply_markup: { inline_keyboard: [
+        [{ text: '⚽ Sports', callback_data: 'mcat_sports' }, { text: '₿ Crypto', callback_data: 'mcat_crypto' }],
+        [{ text: '💰 Finance', callback_data: 'mcat_finance' }, { text: '🔬 Science', callback_data: 'mcat_science' }],
+        [{ text: '🌍 World', callback_data: 'mcat_world' }],
+        [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+      ]}
+    });
+  } catch (err) {
+    console.error('ERROR photo upload:', err.message);
+    await ctx.reply('❌ Image upload failed. Tap Skip to use the default image instead.', {
+      reply_markup: { inline_keyboard: [
+        [{ text: '⏭️ Skip (use default)', callback_data: 'mc_skip_image' }],
+      ]}
+    });
+  }
+});
+
 bot.on('text', async (ctx) => {
   try {
     const userId = ctx.from.id;
@@ -871,23 +921,23 @@ bot.on('text', async (ctx) => {
         return;
       }
       if (mc.step === 'description') {
-        mc.description = text; mc.step = 'category';
-        await ctx.reply('Step 3 of 6: Choose a category:', { reply_markup: { inline_keyboard: [
-          [{ text: '⚽ Sports', callback_data: 'mcat_sports' }, { text: '₿ Crypto', callback_data: 'mcat_crypto' }],
-          [{ text: '💰 Finance', callback_data: 'mcat_finance' }, { text: '🔬 Science', callback_data: 'mcat_science' }],
-          [{ text: '🌍 World', callback_data: 'mcat_world' }],
-          [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
-        ]}});
+        mc.description = text; mc.step = 'image';
+        await ctx.reply('Step 3 of 7: Send a photo for your market, or skip to use the default image.', {
+          reply_markup: { inline_keyboard: [
+            [{ text: '⏭️ Skip (use default)', callback_data: 'mc_skip_image' }],
+            [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+          ]}
+        });
         return;
       }
       if (mc.step === 'yesCondition') {
         mc.yesCondition = text.replace(/^this market will resolve yes if:?\s*/i, ''); mc.step = 'noCondition';
-        await ctx.reply('Step 5 of 6: Complete this line —\n\n"This market will resolve NO if: ..."');
+        await ctx.reply('Step 6 of 7: Complete this line —\n\n"This market will resolve NO if: ..."');
         return;
       }
       if (mc.step === 'noCondition') {
         mc.noCondition = text.replace(/^this market will resolve no if:?\s*/i, ''); mc.step = 'timezone';
-        await ctx.reply('Step 6 of 6: Choose the timezone for the market END time:',
+        await ctx.reply('Step 7 of 7: Choose the timezone for the market END time:',
           { reply_markup: { inline_keyboard: [
             [{ text: 'UTC', callback_data: 'tz_utc' }, { text: 'WAT (Lagos)', callback_data: 'tz_wat' }],
             [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
