@@ -744,10 +744,21 @@ bot.action('my_bets', async (ctx) => {
     // Compute stats
     const total = bets.length;
     const volume = bets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
-    const won = bets.filter(b => b.status === 'won').length;
+    const won = bets.filter(b => b.status === 'won' || b.status === 'claimed').length;
     const lost = bets.filter(b => b.status === 'lost').length;
     const settled = won + lost;
     const winPct = settled > 0 ? Math.round((won / settled) * 100) : null;
+    // PNL: rough estimate — winners get ~2x shares * avg_price back, losers lose stake
+    const pnl = bets.reduce((sum, b) => {
+      if (b.status === 'won' || b.status === 'claimed') {
+        const profit = parseFloat(b.shares || 0) * parseFloat(b.avg_price || 0) - parseFloat(b.amount_usdc || 0);
+        return sum + profit;
+      } else if (b.status === 'lost') {
+        return sum - parseFloat(b.amount_usdc || 0);
+      }
+      return sum;
+    }, 0);
+    const pnlStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
 
     let msg = '📈 Your Bets\n\n';
     msg += '━━━━━━━━━━━━━━━\n';
@@ -755,6 +766,7 @@ bot.action('my_bets', async (ctx) => {
     msg += `💰 Volume: $${volume.toFixed(2)} USDC\n`;
     msg += `✅ Won: ${won}  |  ❌ Lost: ${lost}\n`;
     msg += winPct !== null ? `📊 Win Rate: ${winPct}%\n` : `📊 Win Rate: — (no resolved bets yet)\n`;
+    msg += `💹 PNL: ${pnlStr} USDC\n`;
     msg += '━━━━━━━━━━━━━━━\n\n';
 
     if (!bets.length) {
@@ -763,18 +775,21 @@ bot.action('my_bets', async (ctx) => {
       for (const b of bets.slice(0, 10)) {
         const title = b.market_title || b.market_id;
         const side = b.side === 'yes' ? 'YES ✅' : 'NO ❌';
-        const statusEmoji = b.status === 'won' ? '🏆' : b.status === 'lost' ? '❌' : '⏳';
+        const statusEmoji = (b.status === 'won' || b.status === 'claimed') ? '🏆' : b.status === 'lost' ? '❌' : '⏳';
         const dateStr = b.market_end_time
           ? new Date(Number(b.market_end_time) * 1000).toUTCString().replace(' GMT', '')
           : null;
         msg += `${statusEmoji} ${title}\n`;
         msg += `   ${side} • $${b.amount_usdc} USDC • ${b.shares || '?'} shares\n`;
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
-        msg += `   Status: ${b.status}\n\n`;
+        const statusLabel = b.status === 'claimed' && b.signature
+          ? `claimed ✅ | TX: ${b.signature.slice(0,20)}...`
+          : b.status;
+        msg += `   Status: ${statusLabel}\n\n`;
       }
     }
 
-    const wonBets = bets.filter(b => b.status === 'won');
+    const wonBets = bets.filter(b => b.status === 'won'); // 'claimed' already processed
     const keyboard = { inline_keyboard: [] };
     if (wonBets.length) {
       keyboard.inline_keyboard.push([{ text: `🏆 Claim Winnings (${wonBets.length} bet${wonBets.length > 1 ? 's' : ''})`, callback_data: 'claim_winnings' }]);
