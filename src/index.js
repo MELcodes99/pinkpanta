@@ -748,10 +748,10 @@ bot.action('my_bets', async (ctx) => {
     const lost = bets.filter(b => b.status === 'lost').length;
     const settled = won + lost;
     const winPct = settled > 0 ? Math.round((won / settled) * 100) : null;
-    // PNL: rough estimate — winners get ~2x shares * avg_price back, losers lose stake
+    // PNL: each winning share pays out 1 USDC. profit = shares - stake. loss = -stake.
     const pnl = bets.reduce((sum, b) => {
       if (b.status === 'won' || b.status === 'claimed') {
-        const profit = parseFloat(b.shares || 0) * parseFloat(b.avg_price || 0) - parseFloat(b.amount_usdc || 0);
+        const profit = parseFloat(b.shares || 0) - parseFloat(b.amount_usdc || 0);
         return sum + profit;
       } else if (b.status === 'lost') {
         return sum - parseFloat(b.amount_usdc || 0);
@@ -782,10 +782,12 @@ bot.action('my_bets', async (ctx) => {
         msg += `${statusEmoji} ${title}\n`;
         msg += `   ${side} • $${b.amount_usdc} USDC • ${b.shares || '?'} shares\n`;
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
-        const statusLabel = b.status === 'claimed' && b.signature
-          ? `claimed ✅ | TX: ${b.signature.slice(0,20)}...`
-          : b.status;
-        msg += `   Status: ${statusLabel}\n\n`;
+        const statusLabel = b.status === 'claimed' ? 'claimed ✅' : b.status;
+        msg += `   Status: ${statusLabel}\n`;
+        if (b.status === 'claimed' && b.signature) {
+          msg += `   TX (tap to copy):\n   \`${b.signature}\`\n`;
+        }
+        msg += '\n';
       }
     }
 
