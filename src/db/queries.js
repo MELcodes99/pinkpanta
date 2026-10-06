@@ -145,6 +145,14 @@ async function updateBetStatus(orderId, status) {
   return result.rows[0];
 }
 
+async function getWonBets(telegramId) {
+  const result = await pool.query(
+    "SELECT * FROM bets WHERE telegram_id = $1 AND status = 'won' ORDER BY created_at DESC",
+    [telegramId]
+  );
+  return result.rows || [];
+}
+
 module.exports = {
   getOrCreateUser,
   getUser,
@@ -162,4 +170,5 @@ module.exports = {
   getUserBetForMarket,
   getUserBets,
   updateBetStatus,
+  getWonBets,
 };

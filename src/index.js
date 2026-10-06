@@ -14,13 +14,13 @@ const {
 } = require('./solana/transactions');
 const {
   getOrCreateUser, getUser, updateUserWallet, deleteUserWallet,
-  createBet, getUserBets, updateBetStatus,
+  createBet, getUserBets, updateBetStatus, getWonBets,
 } = require('./db/queries');
 const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -774,10 +774,75 @@ bot.action('my_bets', async (ctx) => {
       }
     }
 
-    await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'start_menu' }]] } });
+    const wonBets = bets.filter(b => b.status === 'won');
+    const keyboard = { inline_keyboard: [] };
+    if (wonBets.length) {
+      keyboard.inline_keyboard.push([{ text: `🏆 Claim Winnings (${wonBets.length} bet${wonBets.length > 1 ? 's' : ''})`, callback_data: 'claim_winnings' }]);
+    }
+    keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'start_menu' }]);
+
+    await ctx.editMessageText(msg, { reply_markup: keyboard });
   } catch (err) {
     console.error('ERROR my_bets:', err.message);
     await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action('claim_winnings', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+
+    const userId = ctx.from.id;
+    const wonBets = await getWonBets(userId);
+
+    if (!wonBets.length) {
+      await ctx.editMessageText('🏆 No wins to claim right now.\n\nWins appear here when a market you bet on resolves in your favour.',
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to My Bets', callback_data: 'my_bets' }]] } });
+      return;
+    }
+
+    await ctx.editMessageText(`⏳ Claiming your winnings...\n\n0 of ${wonBets.length} processed`);
+
+    const user = await getUser(userId);
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    const wallet = user.wallet_address;
+
+    let claimed = 0;
+    let failed = 0;
+    let totalMsg = '';
+
+    for (const b of wonBets) {
+      try {
+        const outcome = b.side === 'yes' ? 'YES' : 'NO';
+        const built = await buildWinClaim({ wallet, marketId: b.market_id, outcome });
+        const signature = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+        await updateBetStatus(b.order_id, 'claimed');
+        claimed++;
+        const title = (b.market_title || b.market_id).slice(0, 40);
+        totalMsg += `✅ ${title}\n   TX: \`${signature.slice(0,20)}...\`\n\n`;
+      } catch (err) {
+        failed++;
+        console.error('Claim failed for bet', b.order_id, err.message);
+      }
+    }
+
+    let resultMsg = `🏆 Claims Complete!\n\n`;
+    resultMsg += `✅ Claimed: ${claimed}\n`;
+    if (failed) resultMsg += `❌ Failed: ${failed}\n`;
+    resultMsg += `\n${totalMsg}`;
+    resultMsg += `💰 Winnings are now in your wallet.`;
+
+    await ctx.editMessageText(resultMsg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [{ text: '💰 View Wallet', callback_data: 'view_wallet' }],
+        [{ text: '⬅️ Back to My Bets', callback_data: 'my_bets' }],
+      ]}
+    });
+  } catch (err) {
+    console.error('ERROR claim_winnings:', err.message);
+    await ctx.reply('❌ Something went wrong claiming your winnings. Please try again.');
   }
 });
 

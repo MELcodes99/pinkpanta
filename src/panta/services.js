@@ -230,6 +230,13 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
   return response.data;
 }
 
+// Build a win claim transaction for a resolved market.
+// wallet: claimant address, marketId: the market's PDA, outcome: 'YES' or 'NO'
+async function buildWinClaim({ wallet, marketId, outcome }) {
+  const response = await pantaClient.post('/claim/build/', { wallet, marketId, outcome });
+  return response.data;
+}
+
 module.exports = {
   SITE_BASE,
   getAccountInfo,
@@ -242,6 +249,7 @@ module.exports = {
   getCachedMarket,
   checkMarketResult,
   uploadMarketImage,
+  buildWinClaim,
   getPositions,
   quoteMarket,
   buildCreateTransaction,
