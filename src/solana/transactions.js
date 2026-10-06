@@ -25,18 +25,29 @@ async function signAndSendBase64Tx(base64Tx, keypair) {
 // Compile instruction list -> v0 tx, sign + broadcast (primary buy)
 async function signAndSendInstructions(instructions, recentBlockhash, keypair) {
   const ixs = instructions.map(decodeInstruction);
+  // Always fetch a fresh blockhash — the one from the API may have expired
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const messageV0 = new TransactionMessage({
     payerKey: keypair.publicKey,
-    recentBlockhash,
+    recentBlockhash: blockhash,
     instructions: ixs,
   }).compileToV0Message();
   const transaction = new VersionedTransaction(messageV0);
   transaction.sign([keypair]);
   const signature = await connection.sendRawTransaction(transaction.serialize(), {
-    skipPreflight: false,
-    maxRetries: 5,
+    skipPreflight: true,
+    maxRetries: 3,
   });
-  await confirm(signature);
+  // Confirm with a timeout so we never hang forever
+  try {
+    await Promise.race([
+      connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('confirmation timeout')), 30000)),
+    ]);
+  } catch (err) {
+    // If it timed out, return the signature anyway — the tx may still land
+    console.warn('confirmTransaction warning:', err.message, 'signature:', signature);
+  }
   return signature;
 }
 
