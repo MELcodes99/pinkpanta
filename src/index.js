@@ -590,7 +590,7 @@ bot.action('confirm_market_creation', async (ctx) => {
     const wallet = user.wallet_address;
 
     const endTime = mc.endTime;
-    const startTime = Math.floor(Date.now() / 1000);
+    const startTime = Math.floor(Date.now() / 1000) + 2 * 3600; // 2h ahead (Panta requires min 1h)
     const resolutionTime = endTime + 3600;
 
     const resolutionRule = `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`;
