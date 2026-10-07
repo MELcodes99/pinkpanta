@@ -14,13 +14,13 @@ const {
 } = require('./solana/transactions');
 const {
   getOrCreateUser, getUser, updateUserWallet, deleteUserWallet,
-  createBet, getUserBets, updateBetStatus, getWonBets,
+  createBet, getUserBets, updateBetStatus, getWonBets, createMarket, getUserMarkets,
 } = require('./db/queries');
 const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -630,6 +630,30 @@ bot.action('confirm_market_creation', async (ctx) => {
     const registered = await registerMarket({ createId: quote.createId, signature });
     const marketId = registered.marketId;
 
+    // Save to local DB so "My Created Markets" works
+    try {
+      await createMarket({
+        marketId,
+        creatorId: user.id,
+        creatorTelegramId: userId,
+        creatorUsername: user.username || '',
+        title: mc.title,
+        description: mc.description,
+        resolutionRules: `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`,
+        yesCondition: mc.yesCondition,
+        noCondition: mc.noCondition,
+        groupChatId: mc.groupId || null,
+        groupName: mc.groupName || null,
+        imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
+        startTime: new Date(startTime * 1000).toISOString(),
+        endTime: new Date(endTime * 1000).toISOString(),
+        resolutionTime: new Date(resolutionTime * 1000).toISOString(),
+        expiresAt: new Date(endTime * 1000).toISOString(),
+      });
+    } catch (dbErr) {
+      console.error('DB save market failed (non-fatal):', dbErr.message);
+    }
+
     const url = SITE_BASE + marketId;
     await ctx.editMessageText(`✅ Market Created & Live!\n\n📊 ${mc.title}\n\nMarket ID: \`${marketId}\`\nTX: \`${signature}\``, {
       parse_mode: 'Markdown',
@@ -724,6 +748,20 @@ bot.action('my_bets', async (ctx) => {
   try {
     if (!(await requirePrivateCb(ctx))) return;
     await ctx.answerCbQuery();
+    await ctx.editMessageText('📊 My Activity', { reply_markup: { inline_keyboard: [
+      [{ text: '📈 Participated', callback_data: 'my_bets_participated' }, { text: '🏛️ Created', callback_data: 'my_bets_created' }],
+      [{ text: '⬅️ Back', callback_data: 'start_menu' }],
+    ]}});
+  } catch (err) {
+    console.error('ERROR my_bets:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action('my_bets_participated', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
 
     const bets = await getUserBets(ctx.from.id);
 
@@ -796,7 +834,7 @@ bot.action('my_bets', async (ctx) => {
     if (wonBets.length) {
       keyboard.inline_keyboard.push([{ text: `🏆 Claim Winnings (${wonBets.length} bet${wonBets.length > 1 ? 's' : ''})`, callback_data: 'claim_winnings' }]);
     }
-    keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'start_menu' }]);
+    keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'my_bets' }]);
 
     await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
   } catch (err) {
@@ -854,12 +892,136 @@ bot.action('claim_winnings', async (ctx) => {
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: [
         [{ text: '💰 View Wallet', callback_data: 'view_wallet' }],
-        [{ text: '⬅️ Back to My Bets', callback_data: 'my_bets' }],
+        [{ text: '⬅️ Back to My Bets', callback_data: 'my_bets_participated' }],
       ]}
     });
   } catch (err) {
     console.error('ERROR claim_winnings:', err.message);
     await ctx.reply('❌ Something went wrong claiming your winnings. Please try again.');
+  }
+});
+
+bot.action('my_bets_created', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+
+    const userId = ctx.from.id;
+    const markets = await getUserMarkets(userId);
+
+    let msg = '🏛️ Markets You Created\n\n';
+
+    if (!markets.length) {
+      msg += 'No markets created yet.\n\nUse /createmarket to create your first prediction market.';
+      await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [
+        [{ text: '⬅️ Back', callback_data: 'my_bets' }],
+      ]}});
+      return;
+    }
+
+    msg += `Total Created: ${markets.length}\n\n`;
+    msg += '━━━━━━━━━━━━━━━\n\n';
+
+    let hasClaimableFees = false;
+    const claimableMarkets = [];
+
+    for (const m of markets.slice(0, 10)) {
+      let liveData = null;
+      try { liveData = await getCachedMarket(m.market_id); } catch (_) {}
+
+      const status = liveData?.status || m.status || 'unknown';
+      const phase = liveData?.phase || 'unknown';
+      const vol = liveData?.volumeUsdc || '0';
+      const statusEmoji = phase === 'secondary' ? '🟢' : phase === 'resolved' ? '✅' : phase === 'cancelled' ? '❌' : '⏳';
+
+      msg += `${statusEmoji} ${m.title}\n`;
+      msg += `   Status: ${phase} | Vol: $${vol}\n`;
+
+      // Check for claimable creator fees (only on graduated/secondary markets)
+      if (phase === 'secondary' || status === 'secondary') {
+        try {
+          const user = await getUser(userId);
+          const feeCheck = await buildCreatorFeeClaim({ wallet: user.wallet_address, marketId: m.market_id });
+          const feesUsdc = feeCheck.claimableFeesUsdc;
+          if (feesUsdc && feesUsdc !== '0') {
+            const feesFormatted = (parseInt(feesUsdc) / 1e6).toFixed(2);
+            msg += `   💰 Claimable Fees: $${feesFormatted} USDC\n`;
+            hasClaimableFees = true;
+            claimableMarkets.push(m.market_id);
+          }
+        } catch (_) {}
+      }
+      msg += '\n';
+    }
+
+    const keyboard = { inline_keyboard: [] };
+    if (hasClaimableFees) {
+      keyboard.inline_keyboard.push([{ text: '💰 Claim Creator Fees', callback_data: 'claim_creator_fees' }]);
+    }
+    keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'my_bets' }]);
+
+    await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR my_bets_created:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action('claim_creator_fees', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+
+    const userId = ctx.from.id;
+    const user = await getUser(userId);
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    const wallet = user.wallet_address;
+    const markets = await getUserMarkets(userId);
+
+    await ctx.editMessageText('⏳ Claiming creator fees...');
+
+    let claimed = 0;
+    let failed = 0;
+    let totalMsg = '';
+
+    for (const m of markets) {
+      try {
+        const built = await buildCreatorFeeClaim({ wallet, marketId: m.market_id });
+        if (!built.claimableFeesUsdc || built.claimableFeesUsdc === '0') continue;
+        const signature = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+        const feesFormatted = (parseInt(built.claimableFeesUsdc) / 1e6).toFixed(2);
+        claimed++;
+        totalMsg += `✅ ${m.title.slice(0, 40)}\n   $${feesFormatted} USDC | [Solscan](https://solscan.io/tx/${signature})\n\n`;
+      } catch (err) {
+        const msg = err.response?.data?.code;
+        if (msg === 'NO_CREATOR_FEES' || msg === 'MARKET_NOT_GRADUATED') continue;
+        failed++;
+        console.error('Creator fee claim failed:', m.market_id, err.message);
+      }
+    }
+
+    if (!claimed) {
+      await ctx.editMessageText('💰 No creator fees to claim right now.\n\nFees accumulate on graduated (P2P) markets with trading activity.',
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'my_bets_created' }]] } });
+      return;
+    }
+
+    let resultMsg = `💰 Creator Fees Claimed!\n\n`;
+    resultMsg += `✅ Claimed from ${claimed} market${claimed > 1 ? 's' : ''}\n`;
+    if (failed) resultMsg += `❌ Failed: ${failed}\n`;
+    resultMsg += `\n${totalMsg}`;
+    resultMsg += `Money is now in your wallet.`;
+
+    await ctx.editMessageText(resultMsg, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [
+        [{ text: '💰 View Wallet', callback_data: 'view_wallet' }],
+        [{ text: '⬅️ Back', callback_data: 'my_bets_created' }],
+      ]}
+    });
+  } catch (err) {
+    console.error('ERROR claim_creator_fees:', err.message);
+    await ctx.reply('❌ Something went wrong. Please try again.');
   }
 });
 

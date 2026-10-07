@@ -230,6 +230,13 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
   return response.data;
 }
 
+// Build a creator fee claim for a graduated market.
+// wallet: creator address, marketId: the market PDA
+async function buildCreatorFeeClaim({ wallet, marketId }) {
+  const response = await pantaClient.post('/claim/creator-fees/', { wallet, marketId });
+  return response.data;
+}
+
 // Build a win claim transaction for a resolved market.
 // wallet: claimant address, marketId: the market's PDA, outcome: 'YES' or 'NO'
 async function buildWinClaim({ wallet, marketId, outcome }) {
@@ -250,6 +257,7 @@ module.exports = {
   checkMarketResult,
   uploadMarketImage,
   buildWinClaim,
+  buildCreatorFeeClaim,
   getPositions,
   quoteMarket,
   buildCreateTransaction,
