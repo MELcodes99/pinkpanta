@@ -604,10 +604,14 @@ bot.action('confirm_market_creation', async (ctx) => {
     };
     const sourcesOfTruth = [sourceByCategory[category] || 'https://www.coingecko.com'];
 
-    // Retry up to 2 times on transient INVALID_MARKET_PARAMS from Panta
-    let quote;
-    for (let attempt = 0; attempt <= 2; attempt++) {
+    // Retry the full quote->build->sign->register pipeline up to 3 times.
+    // Each createId expires in ~60s so we must complete all steps quickly — 
+    // retrying individual steps adds delay that causes later steps to fail.
+    let quote, built, signature;
+    let lastErr;
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        await ctx.editMessageText(`⏳ Creating market on Panta...\n\n1/4 Requesting quote... (attempt ${attempt})`);
         quote = await quoteMarket({
           wallet,
           question: mc.title,
@@ -623,23 +627,25 @@ bot.action('confirm_market_creation', async (ctx) => {
           region: 'Global',
           marketType: mc.marketType || 'breaking',
         });
-        break; // success
-      } catch (qErr) {
-        if (attempt < 2 && qErr.response?.data?.code === 'INVALID_MARKET_PARAMS') {
-          await new Promise(r => setTimeout(r, 1000));
+
+        await ctx.editMessageText('⏳ Creating market on Panta...\n\n2/4 Building transaction...');
+        built = await buildCreateTransaction({ createId: quote.createId, wallet });
+
+        await ctx.editMessageText('⏳ Creating market on Panta...\n\n3/4 Signing & broadcasting...');
+        signature = await signAndSendBase64Tx(built.transaction, keypair);
+
+        await ctx.editMessageText('⏳ Creating market on Panta...\n\n4/4 Registering market...');
+        break; // full pipeline succeeded
+      } catch (pipeErr) {
+        lastErr = pipeErr;
+        const code = pipeErr.response?.data?.code;
+        if (attempt < 3 && (code === 'INVALID_MARKET_PARAMS' || code === 'INVALID_CREATE_PARAMS')) {
+          await new Promise(r => setTimeout(r, 500));
           continue;
         }
-        throw qErr;
+        throw pipeErr;
       }
     }
-
-    await ctx.editMessageText('⏳ Creating market on Panta...\n\n2/4 Building transaction...');
-    const built = await buildCreateTransaction({ createId: quote.createId, wallet });
-
-    await ctx.editMessageText('⏳ Creating market on Panta...\n\n3/4 Signing & broadcasting...');
-    const signature = await signAndSendBase64Tx(built.transaction, keypair);
-
-    await ctx.editMessageText('⏳ Creating market on Panta...\n\n4/4 Registering market...');
     const registered = await registerMarket({ createId: quote.createId, signature });
     const marketId = registered.marketId;
 
