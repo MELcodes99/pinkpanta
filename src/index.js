@@ -785,7 +785,7 @@ bot.action('my_bets', async (ctx) => {
         const statusLabel = b.status === 'claimed' ? 'claimed ✅' : b.status;
         msg += `   Status: ${statusLabel}\n`;
         if (b.status === 'claimed' && b.signature) {
-          msg += `   TX (tap to copy):\n   \`${b.signature}\`\n`;
+          msg += `   [View on Solscan](https://solscan.io/tx/${b.signature})\n`;
         }
         msg += '\n';
       }
@@ -798,7 +798,7 @@ bot.action('my_bets', async (ctx) => {
     }
     keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'start_menu' }]);
 
-    await ctx.editMessageText(msg, { reply_markup: keyboard });
+    await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
   } catch (err) {
     console.error('ERROR my_bets:', err.message);
     await ctx.answerCbQuery('Error', true);
