@@ -604,21 +604,34 @@ bot.action('confirm_market_creation', async (ctx) => {
     };
     const sourcesOfTruth = [sourceByCategory[category] || 'https://www.coingecko.com'];
 
-    const quote = await quoteMarket({
-      wallet,
-      question: mc.title,
-      resolutionRule,
-      sourcesOfTruth,
-      category,
-      startTime,
-      endTime,
-      resolutionTime,
-      title: mc.title,
-      description: mc.description,
-      imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
-      region: 'Global',
-      marketType: mc.marketType || 'breaking',
-    });
+    // Retry up to 2 times on transient INVALID_MARKET_PARAMS from Panta
+    let quote;
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      try {
+        quote = await quoteMarket({
+          wallet,
+          question: mc.title,
+          resolutionRule,
+          sourcesOfTruth,
+          category,
+          startTime,
+          endTime,
+          resolutionTime,
+          title: mc.title,
+          description: mc.description,
+          imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
+          region: 'Global',
+          marketType: mc.marketType || 'breaking',
+        });
+        break; // success
+      } catch (qErr) {
+        if (attempt < 2 && qErr.response?.data?.code === 'INVALID_MARKET_PARAMS') {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        throw qErr;
+      }
+    }
 
     await ctx.editMessageText('⏳ Creating market on Panta...\n\n2/4 Building transaction...');
     const built = await buildCreateTransaction({ createId: quote.createId, wallet });
