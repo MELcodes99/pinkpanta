@@ -646,8 +646,17 @@ bot.action('confirm_market_creation', async (ctx) => {
         throw pipeErr;
       }
     }
-    const registered = await registerMarket({ createId: quote.createId, signature });
-    const marketId = registered.marketId;
+    let marketId;
+    try {
+      const registered = await registerMarket({ createId: quote.createId, signature });
+      marketId = registered.marketId;
+    } catch (regErr) {
+      // Register can fail with a 404/HTML response even when the market is live on-chain.
+      // Fall back to the expectedEventPda from the build step — the market is already created.
+      console.warn('registerMarket failed (non-fatal, market likely live):', regErr.message);
+      marketId = built.expectedEventPda || null;
+    }
+    if (!marketId) throw new Error('Could not determine market ID after creation');
 
     // Save to local DB so "My Created Markets" works
     try {
