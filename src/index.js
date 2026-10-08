@@ -20,7 +20,7 @@ const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal')
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, getAccountCreates, SITE_BASE,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -935,7 +935,20 @@ bot.action('my_bets_created', async (ctx) => {
     await ctx.answerCbQuery();
 
     const userId = ctx.from.id;
-    const markets = await getUserMarkets(userId);
+    const user = await getUser(userId);
+
+    // Primary source: Panta account creates (all registered markets for this API key)
+    // Fallback: local DB markets for this user
+    let creates = [];
+    try { creates = await getAccountCreates(); } catch (_) {}
+    const dbMarkets = await getUserMarkets(userId);
+
+    // Build a title lookup from DB
+    const dbTitleMap = {};
+    dbMarkets.forEach(m => { dbTitleMap[m.market_id] = m.title; });
+
+    // Merge: use Panta creates as source, enrich with DB title where available
+    const markets = creates.length ? creates : dbMarkets.map(m => ({ eventPda: m.market_id, title: m.title }));
 
     let msg = '🏛️ Markets You Created\n\n';
 
@@ -951,31 +964,30 @@ bot.action('my_bets_created', async (ctx) => {
     msg += '━━━━━━━━━━━━━━━\n\n';
 
     let hasClaimableFees = false;
-    const claimableMarkets = [];
 
     for (const m of markets.slice(0, 10)) {
+      const marketId = m.eventPda || m.market_id;
       let liveData = null;
-      try { liveData = await getCachedMarket(m.market_id); } catch (_) {}
+      try { liveData = await getCachedMarket(marketId); } catch (_) {}
 
-      const status = liveData?.status || m.status || 'unknown';
       const phase = liveData?.phase || 'unknown';
       const vol = liveData?.volumeUsdc || '0';
+      const title = dbTitleMap[marketId] || liveData?.question || liveData?.title || marketId.slice(0, 12) + '...';
       const statusEmoji = phase === 'secondary' ? '🟢' : phase === 'resolved' ? '✅' : phase === 'cancelled' ? '❌' : '⏳';
 
-      msg += `${statusEmoji} ${m.title}\n`;
-      msg += `   Status: ${phase} | Vol: $${vol}\n`;
+      msg += `${statusEmoji} ${title}\n`;
+      msg += `   Phase: ${phase} | Vol: $${vol}\n`;
+      msg += `   [View on Panta](${SITE_BASE}${marketId})\n`;
 
       // Check for claimable creator fees (only on graduated/secondary markets)
-      if (phase === 'secondary' || status === 'secondary') {
+      if (phase === 'secondary' || phase === 'secondary_active') {
         try {
-          const user = await getUser(userId);
-          const feeCheck = await buildCreatorFeeClaim({ wallet: user.wallet_address, marketId: m.market_id });
+          const feeCheck = await buildCreatorFeeClaim({ wallet: user.wallet_address, marketId });
           const feesUsdc = feeCheck.claimableFeesUsdc;
           if (feesUsdc && feesUsdc !== '0') {
             const feesFormatted = (parseInt(feesUsdc) / 1e6).toFixed(2);
             msg += `   💰 Claimable Fees: $${feesFormatted} USDC\n`;
             hasClaimableFees = true;
-            claimableMarkets.push(m.market_id);
           }
         } catch (_) {}
       }

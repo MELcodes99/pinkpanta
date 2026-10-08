@@ -230,6 +230,14 @@ async function verifyPrimaryBuy({ orderId, signature, wallet }) {
   return response.data;
 }
 
+// Fetch markets created by this API account.
+// Returns only 'registered' ones — those are real live markets.
+async function getAccountCreates() {
+  const response = await pantaClient.get('/account/creates/');
+  const items = response.data.items || [];
+  return items.filter(m => m.status === 'registered');
+}
+
 // Build a creator fee claim for a graduated market.
 // wallet: creator address, marketId: the market PDA
 async function buildCreatorFeeClaim({ wallet, marketId }) {
@@ -258,6 +266,7 @@ module.exports = {
   uploadMarketImage,
   buildWinClaim,
   buildCreatorFeeClaim,
+  getAccountCreates,
   getPositions,
   quoteMarket,
   buildCreateTransaction,
