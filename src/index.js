@@ -796,7 +796,7 @@ bot.action('my_bets_participated', async (ctx) => {
     // Check unresolved bets against Panta and update their status.
     // Run in parallel so it doesn't block the display.
     await Promise.all(bets.map(async (b) => {
-      if (b.status !== 'submitted') return;
+      if (b.status !== 'submitted' && b.status !== 'confirmed') return;
       try {
         const result = await checkMarketResult(b.market_id);
         if (result.resolved) {
