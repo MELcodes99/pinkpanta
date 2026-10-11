@@ -940,7 +940,11 @@ bot.action('my_bets_created', async (ctx) => {
     // Primary source: Panta account creates (all registered markets for this API key)
     // Fallback: local DB markets for this user
     let creates = [];
-    try { creates = await getAccountCreates(); } catch (_) {}
+    try {
+      const all = await getAccountCreates();
+      // Only show markets created by this user's wallet
+      creates = all.filter(m => m.wallet === user.wallet_address);
+    } catch (_) {}
     const dbMarkets = await getUserMarkets(userId);
 
     // Build a title lookup from DB
