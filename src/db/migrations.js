@@ -44,6 +44,7 @@ async function runMigrations() {
     const betCols = [
       `ADD COLUMN IF NOT EXISTS market_title TEXT`,
       `ADD COLUMN IF NOT EXISTS market_end_time BIGINT`,
+      `ADD COLUMN IF NOT EXISTS claim_signature TEXT`,
     ];
     for (const col of betCols) {
       await client.query(`ALTER TABLE bets ${col};`);

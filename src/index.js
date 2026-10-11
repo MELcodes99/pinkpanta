@@ -850,8 +850,9 @@ bot.action('my_bets_participated', async (ctx) => {
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
         const statusLabel = b.status === 'claimed' ? 'claimed ✅' : b.status;
         msg += `   Status: ${statusLabel}\n`;
-        if (b.status === 'claimed' && b.signature) {
-          msg += `   [View on Solscan](https://solscan.io/tx/${b.signature})\n`;
+        if (b.status === 'claimed' && (b.claim_signature || b.signature)) {
+          const txSig = b.claim_signature || b.signature;
+          msg += `   [View on Solscan](https://solscan.io/tx/${txSig})\n`;
         }
         msg += '\n';
       }
@@ -899,11 +900,11 @@ bot.action('claim_winnings', async (ctx) => {
       try {
         const outcome = b.side === 'yes' ? 'YES' : 'NO';
         const built = await buildWinClaim({ wallet, marketId: b.market_id, outcome });
-        const signature = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
-        await updateBetStatus(b.order_id, 'claimed');
+        const claimSig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+        await updateBetStatus(b.order_id, 'claimed', claimSig);
         claimed++;
         const title = (b.market_title || b.market_id).slice(0, 40);
-        totalMsg += `✅ ${title}\n   TX: \`${signature.slice(0,20)}...\`\n\n`;
+        totalMsg += `✅ ${title}\n   TX: \`${claimSig.slice(0,20)}...\`\n\n`;
       } catch (err) {
         failed++;
         console.error('Claim failed for bet', b.order_id, err.message);

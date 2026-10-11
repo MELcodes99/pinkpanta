@@ -137,10 +137,10 @@ async function getUserBets(telegramId) {
   return result.rows || [];
 }
 
-async function updateBetStatus(orderId, status) {
+async function updateBetStatus(orderId, status, claimSignature = null) {
   const result = await pool.query(
-    'UPDATE bets SET status = $1 WHERE order_id = $2 RETURNING *',
-    [status, orderId]
+    'UPDATE bets SET status = $1, claim_signature = COALESCE($3, claim_signature) WHERE order_id = $2 RETURNING *',
+    [status, orderId, claimSignature]
   );
   return result.rows[0];
 }
