@@ -50,6 +50,21 @@ async function runMigrations() {
       await client.query(`ALTER TABLE bets ${col};`);
     }
 
+    // Multi-wallet support
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS wallets (
+        id SERIAL PRIMARY KEY,
+        telegram_id BIGINT NOT NULL,
+        wallet_address TEXT NOT NULL,
+        encrypted_keypair TEXT NOT NULL,
+        label TEXT,
+        is_imported BOOLEAN DEFAULT FALSE,
+        is_active BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(telegram_id, wallet_address)
+      );
+    `);
+
     console.log('✓ Migrations applied');
   } catch (err) {
     console.error('Migration error:', err.message);

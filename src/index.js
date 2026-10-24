@@ -14,6 +14,7 @@ const {
 } = require('./solana/transactions');
 const {
   getOrCreateUser, getUser, updateUserWallet, deleteUserWallet,
+  getUserWallets, addWallet, switchWallet, seedExistingUserWallet,
   createBet, getUserBets, updateBetStatus, getWonBets, createMarket, getUserMarkets,
 } = require('./db/queries');
 const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
@@ -69,6 +70,7 @@ function walletKeyboard() {
   return { inline_keyboard: [
     [{ text: '📋 Copy Address', callback_data: 'copy_address' }],
     [{ text: '🔐 View Private Key', callback_data: 'view_pk' }],
+    [{ text: '🔄 Switch Wallet', callback_data: 'switch_wallet' }],
     [{ text: '💸 Withdraw', callback_data: 'start_withdrawal' }],
     [{ text: '🗑️ Delete Wallet', callback_data: 'delete_wallet_confirm' }],
     [{ text: '⬅️ Back to Menu', callback_data: 'start_menu' }],
@@ -120,6 +122,10 @@ bot.command('start', async (ctx) => {
     const username = ctx.from.username || ctx.from.first_name || 'User';
     await getOrCreateUser(userId, username);
     const user = await getUser(userId);
+    // Seed existing user into wallets table (idempotent)
+    if (user && user.wallet_address && user.encrypted_keypair) {
+      await seedExistingUserWallet(userId, user.wallet_address, user.encrypted_keypair);
+    }
     await ctx.reply(greetingText(username), { reply_markup: startKeyboard(user && user.wallet_address) });
   } catch (err) {
     console.error('ERROR /start:', err.message);
@@ -323,7 +329,10 @@ bot.action('create_wallet', async (ctx) => {
     const userId = ctx.from.id;
     const keypair = generateUserKeypair();
     const walletAddress = keypair.publicKey.toString();
-    await updateUserWallet(userId, walletAddress, encryptKeypair(keypair));
+    const encKeypair = encryptKeypair(keypair);
+    await updateUserWallet(userId, walletAddress, encKeypair);
+    // Also seed into wallets table
+    await addWallet(userId, walletAddress, encKeypair, 'My Wallet', false);
     userState[userId] = userState[userId] || {};
     userState[userId].privateKeyBase58 = bs58.encode(keypair.secretKey);
     const hidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
@@ -405,6 +414,130 @@ bot.action('reveal_pk', async (ctx) => {
     await ctx.answerCbQuery('Error', true);
   }
 });
+
+// ============================================================
+// SWITCH WALLET — multi-wallet UX
+// ============================================================
+
+bot.action('switch_wallet', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+
+    const userId = ctx.from.id;
+    const user = await getUser(userId);
+
+    // Seed existing wallet into wallets table if not there yet
+    if (user && user.wallet_address && user.encrypted_keypair) {
+      await seedExistingUserWallet(userId, user.wallet_address, user.encrypted_keypair);
+    }
+
+    const wallets = await getUserWallets(userId);
+
+    if (!wallets.length) {
+      await ctx.editMessageText('No wallets found. Create one first.',
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]] } });
+      return;
+    }
+
+    const rows = wallets.map(w => {
+      const short = w.wallet_address.slice(0, 6) + '...' + w.wallet_address.slice(-4);
+      const label = w.label ? `${w.label} — ` : (w.is_imported ? 'Imported — ' : 'Generated — ');
+      const active = w.is_active ? ' ✅' : '';
+      return [{ text: `${label}${short}${active}`, callback_data: `sw_${w.wallet_address}` }];
+    });
+
+    rows.push([{ text: '➕ Import New Wallet', callback_data: 'import_wallet_start' }]);
+    rows.push([{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]);
+
+    await ctx.editMessageText(
+      `🔄 Switch Wallet\n\nYou have ${wallets.length} wallet${wallets.length > 1 ? 's' : ''}. Choose one to activate, or import a new one:`,
+      { reply_markup: { inline_keyboard: rows } }
+    );
+  } catch (err) {
+    console.error('ERROR switch_wallet:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action(/^sw_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    const walletAddress = ctx.match[1];
+    const userId = ctx.from.id;
+
+    const switched = await switchWallet(userId, walletAddress);
+    if (!switched) {
+      await ctx.answerCbQuery('Wallet not found', true);
+      return;
+    }
+
+    const short = walletAddress.slice(0, 6) + '...' + walletAddress.slice(-4);
+    await ctx.answerCbQuery(`✅ Switched to ${short}`);
+
+    // Show updated wallet card
+    const walletData = await getWalletCardMessage(userId);
+    if (walletData) {
+      await ctx.editMessageText(walletData.message, { parse_mode: 'Markdown', reply_markup: walletKeyboard() });
+    }
+  } catch (err) {
+    console.error('ERROR sw_action:', err.message);
+    await ctx.answerCbQuery('Error switching wallet', true);
+  }
+});
+
+bot.action('import_wallet_start', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const userId = ctx.from.id;
+    userState[userId] = userState[userId] || {};
+    userState[userId].importingWallet = true;
+
+    await ctx.editMessageText(
+      `🔑 Import Wallet\n\nPaste your Solana private key (base58) in this chat.\n\n` +
+      `⚠️ The bot will immediately delete your message for security.\n` +
+      `⚠️ Never share your private key anywhere else.\n\n` +
+      `Your message will be deleted automatically after reading.`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: '❌ Cancel', callback_data: 'import_wallet_cancel' }],
+      ]}}
+    );
+  } catch (err) {
+    console.error('ERROR import_wallet_start:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action('import_wallet_cancel', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    const userId = ctx.from.id;
+    if (userState[userId]) delete userState[userId].importingWallet;
+    await ctx.answerCbQuery('Cancelled');
+    // Go back to switch wallet screen
+    const user = await getUser(userId);
+    const wallets = await getUserWallets(userId);
+    const rows = wallets.map(w => {
+      const short = w.wallet_address.slice(0, 6) + '...' + w.wallet_address.slice(-4);
+      const label = w.label ? `${w.label} — ` : (w.is_imported ? 'Imported — ' : 'Generated — ');
+      const active = w.is_active ? ' ✅' : '';
+      return [{ text: `${label}${short}${active}`, callback_data: `sw_${w.wallet_address}` }];
+    });
+    rows.push([{ text: '➕ Import New Wallet', callback_data: 'import_wallet_start' }]);
+    rows.push([{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]);
+    await ctx.editMessageText(
+      `🔄 Switch Wallet\n\nChoose a wallet or import a new one:`,
+      { reply_markup: { inline_keyboard: rows } }
+    );
+  } catch (err) {
+    console.error('ERROR import_wallet_cancel:', err.message);
+  }
+});
+
+// ============================================================
+// WITHDRAWAL
+// ============================================================
 
 bot.action('start_withdrawal', async (ctx) => {
   try {
@@ -498,11 +631,10 @@ bot.action('decline_withdrawal', async (ctx) => {
 // MARKET CREATION FLOW
 // ============================================================
 
-// Skip image — use default PinkPanta image
 bot.action('mc_skip_image', async (ctx) => {
   if (!ctx.session.marketCreation) { await ctx.answerCbQuery('Session expired', true); return; }
   const mc = ctx.session.marketCreation;
-  mc.imageUrl = null; // will fall back to DEFAULT_MARKET_IMAGE in quote
+  mc.imageUrl = null;
   mc.step = 'category';
   await ctx.editMessageText('Step 4 of 7: Choose a category:', { reply_markup: { inline_keyboard: [
     [{ text: '⚽ Sports', callback_data: 'mcat_sports' }, { text: '₿ Crypto', callback_data: 'mcat_crypto' }],
@@ -590,7 +722,7 @@ bot.action('confirm_market_creation', async (ctx) => {
     const wallet = user.wallet_address;
 
     const endTime = mc.endTime;
-    const startTime = Math.floor(Date.now() / 1000) + 2 * 3600; // 2h ahead (Panta requires min 1h)
+    const startTime = Math.floor(Date.now() / 1000) + 2 * 3600;
     const resolutionTime = endTime + 3600;
 
     const resolutionRule = `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`;
@@ -604,38 +736,23 @@ bot.action('confirm_market_creation', async (ctx) => {
     };
     const sourcesOfTruth = [sourceByCategory[category] || 'https://www.coingecko.com'];
 
-    // Retry the full quote->build->sign->register pipeline up to 3 times.
-    // Each createId expires in ~60s so we must complete all steps quickly — 
-    // retrying individual steps adds delay that causes later steps to fail.
     let quote, built, signature;
     let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await ctx.editMessageText(`⏳ Creating market on Panta...\n\n1/4 Requesting quote... (attempt ${attempt})`);
         quote = await quoteMarket({
-          wallet,
-          question: mc.title,
-          resolutionRule,
-          sourcesOfTruth,
-          category,
-          startTime,
-          endTime,
-          resolutionTime,
-          title: mc.title,
-          description: mc.description,
-          imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
-          region: 'Global',
+          wallet, question: mc.title, resolutionRule, sourcesOfTruth, category,
+          startTime, endTime, resolutionTime, title: mc.title, description: mc.description,
+          imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE, region: 'Global',
           marketType: mc.marketType || 'breaking',
         });
-
         await ctx.editMessageText('⏳ Creating market on Panta...\n\n2/4 Building transaction...');
         built = await buildCreateTransaction({ createId: quote.createId, wallet });
-
         await ctx.editMessageText('⏳ Creating market on Panta...\n\n3/4 Signing & broadcasting...');
         signature = await signAndSendBase64Tx(built.transaction, keypair);
-
         await ctx.editMessageText('⏳ Creating market on Panta...\n\n4/4 Registering market...');
-        break; // full pipeline succeeded
+        break;
       } catch (pipeErr) {
         lastErr = pipeErr;
         const code = pipeErr.response?.data?.code;
@@ -646,32 +763,24 @@ bot.action('confirm_market_creation', async (ctx) => {
         throw pipeErr;
       }
     }
+
     let marketId;
     try {
       const registered = await registerMarket({ createId: quote.createId, signature });
       marketId = registered.marketId;
     } catch (regErr) {
-      // Register can fail with a 404/HTML response even when the market is live on-chain.
-      // Fall back to the expectedEventPda from the build step — the market is already created.
       console.warn('registerMarket failed (non-fatal, market likely live):', regErr.message);
       marketId = built.expectedEventPda || null;
     }
     if (!marketId) throw new Error('Could not determine market ID after creation');
 
-    // Save to local DB so "My Created Markets" works
     try {
       await createMarket({
-        marketId,
-        creatorId: user.id,
-        creatorTelegramId: userId,
-        creatorUsername: user.username || '',
-        title: mc.title,
-        description: mc.description,
+        marketId, creatorId: user.id, creatorTelegramId: userId, creatorUsername: user.username || '',
+        title: mc.title, description: mc.description,
         resolutionRules: `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`,
-        yesCondition: mc.yesCondition,
-        noCondition: mc.noCondition,
-        groupChatId: mc.groupId || null,
-        groupName: mc.groupName || null,
+        yesCondition: mc.yesCondition, noCondition: mc.noCondition,
+        groupChatId: mc.groupId || null, groupName: mc.groupName || null,
         imageUrl: mc.imageUrl || DEFAULT_MARKET_IMAGE,
         startTime: new Date(startTime * 1000).toISOString(),
         endTime: new Date(endTime * 1000).toISOString(),
@@ -793,8 +902,6 @@ bot.action('my_bets_participated', async (ctx) => {
 
     const bets = await getUserBets(ctx.from.id);
 
-    // Check unresolved bets against Panta and update their status.
-    // Run in parallel so it doesn't block the display.
     await Promise.all(bets.map(async (b) => {
       if (b.status !== 'submitted' && b.status !== 'confirmed') return;
       try {
@@ -807,18 +914,15 @@ bot.action('my_bets_participated', async (ctx) => {
       } catch (_) {}
     }));
 
-    // Compute stats
     const total = bets.length;
     const volume = bets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
     const won = bets.filter(b => b.status === 'won' || b.status === 'claimed').length;
     const lost = bets.filter(b => b.status === 'lost').length;
     const settled = won + lost;
     const winPct = settled > 0 ? Math.round((won / settled) * 100) : null;
-    // PNL: each winning share pays out 1 USDC. profit = shares - stake. loss = -stake.
     const pnl = bets.reduce((sum, b) => {
       if (b.status === 'won' || b.status === 'claimed') {
-        const profit = parseFloat(b.shares || 0) - parseFloat(b.amount_usdc || 0);
-        return sum + profit;
+        return sum + parseFloat(b.shares || 0) - parseFloat(b.amount_usdc || 0);
       } else if (b.status === 'lost') {
         return sum - parseFloat(b.amount_usdc || 0);
       }
@@ -858,7 +962,7 @@ bot.action('my_bets_participated', async (ctx) => {
       }
     }
 
-    const wonBets = bets.filter(b => b.status === 'won'); // 'claimed' already processed
+    const wonBets = bets.filter(b => b.status === 'won');
     const keyboard = { inline_keyboard: [] };
     if (wonBets.length) {
       keyboard.inline_keyboard.push([{ text: `🏆 Claim Winnings (${wonBets.length} bet${wonBets.length > 1 ? 's' : ''})`, callback_data: 'claim_winnings' }]);
@@ -938,21 +1042,16 @@ bot.action('my_bets_created', async (ctx) => {
     const userId = ctx.from.id;
     const user = await getUser(userId);
 
-    // Primary source: Panta account creates (all registered markets for this API key)
-    // Fallback: local DB markets for this user
     let creates = [];
     try {
       const all = await getAccountCreates();
-      // Only show markets created by this user's wallet
       creates = all.filter(m => m.wallet === user.wallet_address);
     } catch (_) {}
     const dbMarkets = await getUserMarkets(userId);
 
-    // Build a title lookup from DB
     const dbTitleMap = {};
     dbMarkets.forEach(m => { dbTitleMap[m.market_id] = m.title; });
 
-    // Merge: use Panta creates as source, enrich with DB title where available
     const markets = creates.length ? creates : dbMarkets.map(m => ({ eventPda: m.market_id, title: m.title }));
 
     let msg = '🏛️ Markets You Created\n\n';
@@ -984,7 +1083,6 @@ bot.action('my_bets_created', async (ctx) => {
       msg += `   Phase: ${phase} | Vol: $${vol}\n`;
       msg += `   [View on Panta](${SITE_BASE}${marketId})\n`;
 
-      // Check for claimable creator fees (only on graduated/secondary markets)
       if (phase === 'secondary' || phase === 'secondary_active') {
         try {
           const feeCheck = await buildCreatorFeeClaim({ wallet: user.wallet_address, marketId });
@@ -1086,20 +1184,16 @@ bot.action('start_menu', async (ctx) => {
 // SINGLE TEXT HANDLER (private only)
 // ============================================================
 
-// Handle photo uploads during market creation image step
 bot.on('photo', async (ctx) => {
   const mc = ctx.session && ctx.session.marketCreation;
   if (!mc || mc.step !== 'image') return;
   try {
     await ctx.reply('⏳ Uploading your image...');
-    // Get the largest photo size Telegram provides
     const photos = ctx.message.photo;
     const photo = photos[photos.length - 1];
     const fileLink = await ctx.telegram.getFileLink(photo.file_id);
-    // Download the image as a buffer
     const imgRes = await require('axios').get(fileLink.href, { responseType: 'arraybuffer' });
     const imageBuffer = Buffer.from(imgRes.data);
-    // Upload to Cloudinary via Panta
     const imageUrl = await uploadMarketImage(imageBuffer, 'market.jpg');
     mc.imageUrl = imageUrl;
     mc.step = 'category';
@@ -1130,6 +1224,57 @@ bot.on('text', async (ctx) => {
 
     if (text.startsWith('/')) return;
     if (!isPrivate) return;
+
+    // ── WALLET IMPORT ── must check first so private key isn't logged
+    if (st.importingWallet) {
+      // Immediately delete the message containing the private key
+      try { await ctx.deleteMessage(); } catch (_) {}
+
+      delete st.importingWallet;
+
+      let keypair;
+      try {
+        const secretKey = bs58.decode(text);
+        const { Keypair } = require('@solana/web3.js');
+        keypair = Keypair.fromSecretKey(secretKey);
+      } catch (e) {
+        await ctx.reply('❌ Invalid private key. Make sure it is a valid base58 Solana private key.', {
+          reply_markup: { inline_keyboard: [[{ text: '🔄 Try Again', callback_data: 'import_wallet_start' }, { text: '⬅️ Cancel', callback_data: 'view_wallet' }]] }
+        });
+        return;
+      }
+
+      const walletAddress = keypair.publicKey.toString();
+      const encKeypair = encryptKeypair(keypair);
+
+      // Check if this wallet is already saved
+      const existingWallets = await getUserWallets(userId);
+      const alreadyExists = existingWallets.find(w => w.wallet_address === walletAddress);
+      if (alreadyExists) {
+        // Just switch to it
+        await switchWallet(userId, walletAddress);
+        await ctx.reply(
+          `✅ Wallet already in your list — switched to it!\n\n📍 \`${walletAddress}\`\n\nThis wallet is now active.`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💰 View Wallet', callback_data: 'view_wallet' }]] } }
+        );
+        return;
+      }
+
+      // Save as imported wallet (activates it)
+      await addWallet(userId, walletAddress, encKeypair, 'Imported', true);
+
+      await ctx.reply(
+        `✅ Wallet Imported & Active!\n\n📍 Address: \`${walletAddress}\`\n\n` +
+        `⚠️ Your message with the private key has been deleted.\n` +
+        `⚠️ Please delete any copies of your key from your clipboard or notes.\n\n` +
+        `All bets, claims, and withdrawals now use this wallet.`,
+        { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+          [{ text: '💰 View Wallet', callback_data: 'view_wallet' }],
+          [{ text: '🔄 Switch Wallet', callback_data: 'switch_wallet' }],
+        ]}}
+      );
+      return;
+    }
 
     if (st.deleteInProgress) {
       if (text === 'Delete') {

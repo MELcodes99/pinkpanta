@@ -30,6 +30,69 @@ async function deleteUserWallet(userId) {
     'UPDATE users SET wallet_address = NULL, encrypted_keypair = NULL, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = $1',
     [userId]
   );
+  // Also deactivate all wallets in wallets table
+  await pool.query('UPDATE wallets SET is_active = FALSE WHERE telegram_id = $1', [userId]);
+}
+
+// ========== MULTI-WALLET ==========
+
+async function getUserWallets(telegramId) {
+  const result = await pool.query(
+    'SELECT * FROM wallets WHERE telegram_id = $1 ORDER BY is_active DESC, created_at ASC',
+    [telegramId]
+  );
+  return result.rows || [];
+}
+
+async function addWallet(telegramId, walletAddress, encryptedKeypair, label, isImported) {
+  // Deactivate all existing wallets first
+  await pool.query('UPDATE wallets SET is_active = FALSE WHERE telegram_id = $1', [telegramId]);
+  // Insert or update — if address already exists, just activate it
+  const result = await pool.query(
+    `INSERT INTO wallets (telegram_id, wallet_address, encrypted_keypair, label, is_imported, is_active)
+     VALUES ($1, $2, $3, $4, $5, TRUE)
+     ON CONFLICT (telegram_id, wallet_address)
+     DO UPDATE SET is_active = TRUE, encrypted_keypair = EXCLUDED.encrypted_keypair, label = EXCLUDED.label
+     RETURNING *`,
+    [telegramId, walletAddress, encryptedKeypair, label || null, isImported || false]
+  );
+  // Sync active wallet to users table
+  await pool.query(
+    'UPDATE users SET wallet_address = $1, encrypted_keypair = $2, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = $3',
+    [walletAddress, encryptedKeypair, telegramId]
+  );
+  return result.rows[0];
+}
+
+async function switchWallet(telegramId, walletAddress) {
+  const check = await pool.query(
+    'SELECT * FROM wallets WHERE telegram_id = $1 AND wallet_address = $2',
+    [telegramId, walletAddress]
+  );
+  if (!check.rows.length) return null;
+  const w = check.rows[0];
+  await pool.query('UPDATE wallets SET is_active = FALSE WHERE telegram_id = $1', [telegramId]);
+  await pool.query(
+    'UPDATE wallets SET is_active = TRUE WHERE telegram_id = $1 AND wallet_address = $2',
+    [telegramId, walletAddress]
+  );
+  // Sync to users table
+  await pool.query(
+    'UPDATE users SET wallet_address = $1, encrypted_keypair = $2, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = $3',
+    [walletAddress, w.encrypted_keypair, telegramId]
+  );
+  return w;
+}
+
+async function seedExistingUserWallet(telegramId, walletAddress, encryptedKeypair) {
+  // Seeds existing users into wallets table on first startup (idempotent)
+  if (!walletAddress || !encryptedKeypair) return;
+  await pool.query(
+    `INSERT INTO wallets (telegram_id, wallet_address, encrypted_keypair, label, is_imported, is_active)
+     VALUES ($1, $2, $3, 'My Wallet', FALSE, TRUE)
+     ON CONFLICT (telegram_id, wallet_address) DO NOTHING`,
+    [telegramId, walletAddress, encryptedKeypair]
+  );
 }
 
 // ========== MARKETS ==========
@@ -158,6 +221,10 @@ module.exports = {
   getUser,
   updateUserWallet,
   deleteUserWallet,
+  getUserWallets,
+  addWallet,
+  switchWallet,
+  seedExistingUserWallet,
   createMarket,
   getUserMarkets,
   getMarketsByGroup,
