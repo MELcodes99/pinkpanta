@@ -25,7 +25,7 @@ async function signAndSendBase64Tx(base64Tx, keypair) {
 // Compile instruction list -> v0 tx, sign + broadcast (primary buy)
 async function signAndSendInstructions(instructions, recentBlockhash, keypair) {
   const ixs = instructions.map(decodeInstruction);
-  // Always fetch a fresh blockhash — the one from the API may have expired
+  // Always fetch a fresh blockhash, the one from the API may have expired
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
   const messageV0 = new TransactionMessage({
     payerKey: keypair.publicKey,
@@ -34,21 +34,29 @@ async function signAndSendInstructions(instructions, recentBlockhash, keypair) {
   }).compileToV0Message();
   const transaction = new VersionedTransaction(messageV0);
   transaction.sign([keypair]);
-  const signature = await connection.sendRawTransaction(transaction.serialize(), {
-    skipPreflight: true,
-    maxRetries: 3,
-  });
-  // Confirm with a timeout so we never hang forever
-  try {
-    await Promise.race([
-      connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('confirmation timeout')), 30000)),
-    ]);
-  } catch (err) {
-    // If it timed out, return the signature anyway — the tx may still land
-    console.warn('confirmTransaction warning:', err.message, 'signature:', signature);
+  const raw = transaction.serialize();
+
+  // Simulate first so program errors surface before we broadcast
+  const sim = await connection.simulateTransaction(transaction, { sigVerify: false });
+  if (sim.value.err) {
+    const logs = (sim.value.logs || []).slice(-3).join(' | ');
+    throw new Error('Simulation failed: ' + JSON.stringify(sim.value.err) + ' ' + logs);
   }
-  return signature;
+
+  const signature = await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 });
+  console.log('Tx sent:', signature);
+
+  // Rebroadcast until confirmed, failed, or the blockhash expires
+  while (true) {
+    const { value } = await connection.getSignatureStatuses([signature]);
+    const st = value[0];
+    if (st && st.err) throw new Error('Tx failed on-chain: ' + JSON.stringify(st.err) + ' sig: ' + signature);
+    if (st && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) return signature;
+    const height = await connection.getBlockHeight('confirmed');
+    if (height > lastValidBlockHeight) throw new Error('Tx expired without landing, sig: ' + signature);
+    await connection.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 2000));
+  }
 }
 
 function decodeInstruction(ix) {
