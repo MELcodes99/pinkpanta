@@ -57,12 +57,17 @@ async function getSecondaryMarkets() {
 
 async function getLiveMarkets(limit = 20) {
   try {
-    const primary = await getPrimaryMarkets().catch(() => ({ items: [] }));
-    const items = (primary.items || []).slice(0, limit);
+    const [primary, secondary] = await Promise.all([
+      getPrimaryMarkets().catch(() => ({ items: [] })),
+      getSecondaryMarkets().catch(() => ({ items: [] })),
+    ]);
+    const primaryItems = (primary.items || []).map(m => ({ ...m, bettable: true }));
+    const secondaryItems = (secondary.items || []).map(m => ({ ...m, bettable: false }));
+    const all = [...primaryItems, ...secondaryItems].slice(0, limit);
     const detailed = await Promise.all(
-      items.map(m => getMarket(m.marketId).catch(() => m))
+      all.map(m => getMarket(m.marketId).catch(() => m))
     );
-    return detailed.map(m => ({ ...m, bettable: true }));
+    return detailed.map((m, i) => ({ ...m, bettable: all[i].bettable }));
   } catch (e) {
     return [];
   }
