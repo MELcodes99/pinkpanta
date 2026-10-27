@@ -14,14 +14,15 @@ const {
 } = require('./solana/transactions');
 const {
   getOrCreateUser, getUser, updateUserWallet, deleteUserWallet,
-  getUserWallets, addWallet, switchWallet, seedExistingUserWallet,
   createBet, getUserBets, updateBetStatus, getWonBets, createMarket, getUserMarkets,
 } = require('./db/queries');
 const { sendSolWithdrawal, sendUsdcWithdrawal } = require('./solana/withdrawal');
 const {
   quoteMarket, buildCreateTransaction, registerMarket,
   quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
-  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, getAccountCreates, SITE_BASE,
+  getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, getAccountCreates, getPositions, SITE_BASE,
+  getOrderBook, buildListShares, buildRestBid, buildFillOrder, buildCancelOrder,
+  buildDispute, submitDispute, getDisputeStatus,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -70,7 +71,6 @@ function walletKeyboard() {
   return { inline_keyboard: [
     [{ text: '📋 Copy Address', callback_data: 'copy_address' }],
     [{ text: '🔐 View Private Key', callback_data: 'view_pk' }],
-    [{ text: '🔄 Switch Wallet', callback_data: 'switch_wallet' }],
     [{ text: '💸 Withdraw', callback_data: 'start_withdrawal' }],
     [{ text: '🗑️ Delete Wallet', callback_data: 'delete_wallet_confirm' }],
     [{ text: '⬅️ Back to Menu', callback_data: 'start_menu' }],
@@ -122,10 +122,6 @@ bot.command('start', async (ctx) => {
     const username = ctx.from.username || ctx.from.first_name || 'User';
     await getOrCreateUser(userId, username);
     const user = await getUser(userId);
-    // Seed existing user into wallets table (idempotent)
-    if (user && user.wallet_address && user.encrypted_keypair) {
-      await seedExistingUserWallet(userId, user.wallet_address, user.encrypted_keypair);
-    }
     await ctx.reply(greetingText(username), { reply_markup: startKeyboard(user && user.wallet_address) });
   } catch (err) {
     console.error('ERROR /start:', err.message);
@@ -272,8 +268,15 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
         { text: '❌ Bet NO', callback_data: `pbet_no_${marketId}` },
       ]);
     } else if (isSecondary) {
-      msg += `\n\n🔗 This market is in secondary (P2P) trading. Trade it on Panta:`;
-      keyboard.inline_keyboard.push([{ text: '🔗 Trade on Panta', url }]);
+      msg += `\n\n📊 This market is in secondary (P2P) trading.`;
+      keyboard.inline_keyboard.push([
+        { text: '📖 Order Book', callback_data: `ob_${marketId}` },
+        { text: '💰 Sell Shares', callback_data: `sell_shares_${marketId}` },
+      ]);
+      keyboard.inline_keyboard.push([
+        { text: '🤝 Place Bid', callback_data: `place_bid_${marketId}` },
+        { text: '🔗 Trade on Panta', url },
+      ]);
     } else {
       msg += `\n\n⚠️ This market is not open for betting.`;
     }
@@ -329,10 +332,7 @@ bot.action('create_wallet', async (ctx) => {
     const userId = ctx.from.id;
     const keypair = generateUserKeypair();
     const walletAddress = keypair.publicKey.toString();
-    const encKeypair = encryptKeypair(keypair);
-    await updateUserWallet(userId, walletAddress, encKeypair);
-    // Also seed into wallets table
-    await addWallet(userId, walletAddress, encKeypair, 'My Wallet', false);
+    await updateUserWallet(userId, walletAddress, encryptKeypair(keypair));
     userState[userId] = userState[userId] || {};
     userState[userId].privateKeyBase58 = bs58.encode(keypair.secretKey);
     const hidden = '••••••••••••••••••••••••••••••••••••••••••••••••••••';
@@ -414,130 +414,6 @@ bot.action('reveal_pk', async (ctx) => {
     await ctx.answerCbQuery('Error', true);
   }
 });
-
-// ============================================================
-// SWITCH WALLET — multi-wallet UX
-// ============================================================
-
-bot.action('switch_wallet', async (ctx) => {
-  try {
-    if (!(await requirePrivateCb(ctx))) return;
-    await ctx.answerCbQuery();
-
-    const userId = ctx.from.id;
-    const user = await getUser(userId);
-
-    // Seed existing wallet into wallets table if not there yet
-    if (user && user.wallet_address && user.encrypted_keypair) {
-      await seedExistingUserWallet(userId, user.wallet_address, user.encrypted_keypair);
-    }
-
-    const wallets = await getUserWallets(userId);
-
-    if (!wallets.length) {
-      await ctx.editMessageText('No wallets found. Create one first.',
-        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]] } });
-      return;
-    }
-
-    const rows = wallets.map(w => {
-      const short = w.wallet_address.slice(0, 6) + '...' + w.wallet_address.slice(-4);
-      const label = w.label ? `${w.label} — ` : (w.is_imported ? 'Imported — ' : 'Generated — ');
-      const active = w.is_active ? ' ✅' : '';
-      return [{ text: `${label}${short}${active}`, callback_data: `sw_${w.wallet_address}` }];
-    });
-
-    rows.push([{ text: '➕ Import New Wallet', callback_data: 'import_wallet_start' }]);
-    rows.push([{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]);
-
-    await ctx.editMessageText(
-      `🔄 Switch Wallet\n\nYou have ${wallets.length} wallet${wallets.length > 1 ? 's' : ''}. Choose one to activate, or import a new one:`,
-      { reply_markup: { inline_keyboard: rows } }
-    );
-  } catch (err) {
-    console.error('ERROR switch_wallet:', err.message);
-    await ctx.answerCbQuery('Error', true);
-  }
-});
-
-bot.action(/^sw_(.+)$/, async (ctx) => {
-  try {
-    if (!(await requirePrivateCb(ctx))) return;
-    const walletAddress = ctx.match[1];
-    const userId = ctx.from.id;
-
-    const switched = await switchWallet(userId, walletAddress);
-    if (!switched) {
-      await ctx.answerCbQuery('Wallet not found', true);
-      return;
-    }
-
-    const short = walletAddress.slice(0, 6) + '...' + walletAddress.slice(-4);
-    await ctx.answerCbQuery(`✅ Switched to ${short}`);
-
-    // Show updated wallet card
-    const walletData = await getWalletCardMessage(userId);
-    if (walletData) {
-      await ctx.editMessageText(walletData.message, { parse_mode: 'Markdown', reply_markup: walletKeyboard() });
-    }
-  } catch (err) {
-    console.error('ERROR sw_action:', err.message);
-    await ctx.answerCbQuery('Error switching wallet', true);
-  }
-});
-
-bot.action('import_wallet_start', async (ctx) => {
-  try {
-    if (!(await requirePrivateCb(ctx))) return;
-    await ctx.answerCbQuery();
-    const userId = ctx.from.id;
-    userState[userId] = userState[userId] || {};
-    userState[userId].importingWallet = true;
-
-    await ctx.editMessageText(
-      `🔑 Import Wallet\n\nPaste your Solana private key (base58) in this chat.\n\n` +
-      `⚠️ The bot will immediately delete your message for security.\n` +
-      `⚠️ Never share your private key anywhere else.\n\n` +
-      `Your message will be deleted automatically after reading.`,
-      { reply_markup: { inline_keyboard: [
-        [{ text: '❌ Cancel', callback_data: 'import_wallet_cancel' }],
-      ]}}
-    );
-  } catch (err) {
-    console.error('ERROR import_wallet_start:', err.message);
-    await ctx.answerCbQuery('Error', true);
-  }
-});
-
-bot.action('import_wallet_cancel', async (ctx) => {
-  try {
-    if (!(await requirePrivateCb(ctx))) return;
-    const userId = ctx.from.id;
-    if (userState[userId]) delete userState[userId].importingWallet;
-    await ctx.answerCbQuery('Cancelled');
-    // Go back to switch wallet screen
-    const user = await getUser(userId);
-    const wallets = await getUserWallets(userId);
-    const rows = wallets.map(w => {
-      const short = w.wallet_address.slice(0, 6) + '...' + w.wallet_address.slice(-4);
-      const label = w.label ? `${w.label} — ` : (w.is_imported ? 'Imported — ' : 'Generated — ');
-      const active = w.is_active ? ' ✅' : '';
-      return [{ text: `${label}${short}${active}`, callback_data: `sw_${w.wallet_address}` }];
-    });
-    rows.push([{ text: '➕ Import New Wallet', callback_data: 'import_wallet_start' }]);
-    rows.push([{ text: '⬅️ Back to Wallet', callback_data: 'view_wallet' }]);
-    await ctx.editMessageText(
-      `🔄 Switch Wallet\n\nChoose a wallet or import a new one:`,
-      { reply_markup: { inline_keyboard: rows } }
-    );
-  } catch (err) {
-    console.error('ERROR import_wallet_cancel:', err.message);
-  }
-});
-
-// ============================================================
-// WITHDRAWAL
-// ============================================================
 
 bot.action('start_withdrawal', async (ctx) => {
   try {
@@ -737,7 +613,6 @@ bot.action('confirm_market_creation', async (ctx) => {
     const sourcesOfTruth = [sourceByCategory[category] || 'https://www.coingecko.com'];
 
     let quote, built, signature;
-    let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await ctx.editMessageText(`⏳ Creating market on Panta...\n\n1/4 Requesting quote... (attempt ${attempt})`);
@@ -754,30 +629,27 @@ bot.action('confirm_market_creation', async (ctx) => {
         await ctx.editMessageText('⏳ Creating market on Panta...\n\n4/4 Registering market...');
         break;
       } catch (pipeErr) {
-        lastErr = pipeErr;
         const code = pipeErr.response?.data?.code;
         if (attempt < 3 && (code === 'INVALID_MARKET_PARAMS' || code === 'INVALID_CREATE_PARAMS')) {
-          await new Promise(r => setTimeout(r, 500));
-          continue;
+          await new Promise(r => setTimeout(r, 500)); continue;
         }
         throw pipeErr;
       }
     }
-
     let marketId;
     try {
       const registered = await registerMarket({ createId: quote.createId, signature });
       marketId = registered.marketId;
     } catch (regErr) {
-      console.warn('registerMarket failed (non-fatal, market likely live):', regErr.message);
+      console.warn('registerMarket failed (non-fatal):', regErr.message);
       marketId = built.expectedEventPda || null;
     }
     if (!marketId) throw new Error('Could not determine market ID after creation');
 
     try {
       await createMarket({
-        marketId, creatorId: user.id, creatorTelegramId: userId, creatorUsername: user.username || '',
-        title: mc.title, description: mc.description,
+        marketId, creatorId: user.id, creatorTelegramId: userId,
+        creatorUsername: user.username || '', title: mc.title, description: mc.description,
         resolutionRules: `Resolves YES if: ${mc.yesCondition}. Resolves NO if: ${mc.noCondition}.`,
         yesCondition: mc.yesCondition, noCondition: mc.noCondition,
         groupChatId: mc.groupId || null, groupName: mc.groupName || null,
@@ -787,9 +659,7 @@ bot.action('confirm_market_creation', async (ctx) => {
         resolutionTime: new Date(resolutionTime * 1000).toISOString(),
         expiresAt: new Date(endTime * 1000).toISOString(),
       });
-    } catch (dbErr) {
-      console.error('DB save market failed (non-fatal):', dbErr.message);
-    }
+    } catch (dbErr) { console.error('DB save market failed (non-fatal):', dbErr.message); }
 
     const url = SITE_BASE + marketId;
     await ctx.editMessageText(`✅ Market Created & Live!\n\n📊 ${mc.title}\n\nMarket ID: \`${marketId}\`\nTX: \`${signature}\``, {
@@ -831,21 +701,14 @@ bot.action('confirm_bet', async (ctx) => {
     const wallet = user.wallet_address;
     const { marketId, side, quote, amount } = st.bet;
 
-    const built = await buildPrimaryBuy({
-      quoteId: quote.quoteId, wallet, userId: String(userId), maxSlippageBps: 100,
-    });
-
+    const built = await buildPrimaryBuy({ quoteId: quote.quoteId, wallet, userId: String(userId), maxSlippageBps: 100 });
     await ctx.editMessageText('⏳ Placing bet...\n\n2/4 Signing & broadcasting...');
     const signature = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
-
     await ctx.editMessageText('⏳ Placing bet...\n\n3/4 Submitting to Panta...');
     await submitPrimaryBuy({ orderId: built.orderId, signature, wallet });
 
     let finalStatus = 'submitted';
-    try {
-      const v = await verifyPrimaryBuy({ orderId: built.orderId });
-      finalStatus = v.status || 'submitted';
-    } catch (_) {}
+    try { const v = await verifyPrimaryBuy({ orderId: built.orderId }); finalStatus = v.status || 'submitted'; } catch (_) {}
 
     await createBet({
       userId: user.id, telegramId: userId, marketId, side,
@@ -854,10 +717,8 @@ bot.action('confirm_bet', async (ctx) => {
       marketTitle: st.bet.title || null, marketEndTime: st.bet.endTime || null,
     });
 
-    const betTitle = st.bet.title || 'market';
-
     await ctx.editMessageText(
-      `✅ Bet Placed!\n\n📊 ${betTitle}\nSide: ${side === 'yes' ? 'YES ✅' : 'NO ❌'}\nAmount: ${amount} USDC\nShares: ${quote.shares}\nAvg Price: ${quote.avgPrice}\nStatus: ${finalStatus}\nTX: \`${signature}\``,
+      `✅ Bet Placed!\n\n📊 ${st.bet.title || 'market'}\nSide: ${side === 'yes' ? 'YES ✅' : 'NO ❌'}\nAmount: ${amount} USDC\nShares: ${quote.shares}\nAvg Price: ${quote.avgPrice}\nStatus: ${finalStatus}\nTX: \`${signature}\``,
       { parse_mode: 'Markdown' });
 
     delete st.bet;
@@ -900,9 +761,13 @@ bot.action('my_bets_participated', async (ctx) => {
     if (!(await requirePrivateCb(ctx))) return;
     await ctx.answerCbQuery();
 
-    const bets = await getUserBets(ctx.from.id);
+    const userId = ctx.from.id;
+    const user = await getUser(userId);
+    const activeWallet = user?.wallet_address;
 
-    await Promise.all(bets.map(async (b) => {
+    const dbBets = await getUserBets(userId);
+
+    await Promise.all(dbBets.map(async (b) => {
       if (b.status !== 'submitted' && b.status !== 'confirmed') return;
       try {
         const result = await checkMarketResult(b.market_id);
@@ -914,55 +779,79 @@ bot.action('my_bets_participated', async (ctx) => {
       } catch (_) {}
     }));
 
-    const total = bets.length;
-    const volume = bets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
-    const won = bets.filter(b => b.status === 'won' || b.status === 'claimed').length;
-    const lost = bets.filter(b => b.status === 'lost').length;
-    const settled = won + lost;
-    const winPct = settled > 0 ? Math.round((won / settled) * 100) : null;
-    const pnl = bets.reduce((sum, b) => {
-      if (b.status === 'won' || b.status === 'claimed') {
-        return sum + parseFloat(b.shares || 0) - parseFloat(b.amount_usdc || 0);
-      } else if (b.status === 'lost') {
-        return sum - parseFloat(b.amount_usdc || 0);
-      }
+    let onChainPositions = [];
+    if (activeWallet) {
+      try { onChainPositions = await getPositions(activeWallet) || []; } catch (_) {}
+    }
+
+    const dbMarketSideKeys = new Set(dbBets.map(b => `${b.market_id}:${b.side}`));
+    const onChainRows = onChainPositions
+      .filter(p => {
+        const side = p.side?.toLowerCase();
+        return !dbMarketSideKeys.has(`${p.marketId || p.market_id}:${side}`);
+      })
+      .map(p => ({
+        _onChain: true,
+        market_id: p.marketId || p.market_id,
+        market_title: p.marketTitle || p.market_name || p.question || p.marketId || p.market_id,
+        side: p.side?.toLowerCase(),
+        amount_usdc: p.amountUsdc || p.cost || p.amount || 0,
+        shares: p.shares || p.numShares || p.quantity || '?',
+        status: p.resolved
+          ? ((p.side?.toLowerCase() === 'yes' && p.yesWins) || (p.side?.toLowerCase() === 'no' && !p.yesWins) ? 'won' : 'lost')
+          : 'on-chain',
+        market_end_time: p.endTime || p.resolutionTime || null,
+      }));
+
+    const allBets = [...dbBets, ...onChainRows];
+
+    const total = allBets.length;
+    const volume = allBets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
+    const wonCount = allBets.filter(b => b.status === 'won' || b.status === 'claimed').length;
+    const lostCount = allBets.filter(b => b.status === 'lost').length;
+    const settled = wonCount + lostCount;
+    const winPct = settled > 0 ? Math.round((wonCount / settled) * 100) : null;
+    const pnl = allBets.reduce((sum, b) => {
+      if (b.status === 'won' || b.status === 'claimed') return sum + (parseFloat(b.shares || 0) - parseFloat(b.amount_usdc || 0));
+      else if (b.status === 'lost') return sum - parseFloat(b.amount_usdc || 0);
       return sum;
     }, 0);
-    const pnlStr = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+    const pnlStr = pnl >= 0 ? `+${pnl.toFixed(2)}` : `-${Math.abs(pnl).toFixed(2)}`;
 
-    let msg = '📈 Your Bets\n\n';
-    msg += '━━━━━━━━━━━━━━━\n';
+    let msg = '📈 Your Bets\n';
+    if (onChainRows.length) msg += `_(includes ${onChainRows.length} on-chain position${onChainRows.length > 1 ? 's' : ''} from active wallet)_\n`;
+    msg += '\n━━━━━━━━━━━━━━━\n';
     msg += `🎯 Total Bets: ${total}\n`;
-    msg += `💰 Volume: $${volume.toFixed(2)} USDC\n`;
-    msg += `✅ Won: ${won}  |  ❌ Lost: ${lost}\n`;
+    msg += `💰 Volume: ${volume.toFixed(2)} USDC\n`;
+    msg += `✅ Won: ${wonCount}  |  ❌ Lost: ${lostCount}\n`;
     msg += winPct !== null ? `📊 Win Rate: ${winPct}%\n` : `📊 Win Rate: — (no resolved bets yet)\n`;
     msg += `💹 PNL: ${pnlStr} USDC\n`;
     msg += '━━━━━━━━━━━━━━━\n\n';
 
-    if (!bets.length) {
+    if (!allBets.length) {
       msg += 'No bets yet. Use Browse Markets to place one.';
     } else {
-      for (const b of bets.slice(0, 10)) {
+      for (const b of allBets.slice(0, 10)) {
         const title = b.market_title || b.market_id;
         const side = b.side === 'yes' ? 'YES ✅' : 'NO ❌';
         const statusEmoji = (b.status === 'won' || b.status === 'claimed') ? '🏆' : b.status === 'lost' ? '❌' : '⏳';
-        const dateStr = b.market_end_time
-          ? new Date(Number(b.market_end_time) * 1000).toUTCString().replace(' GMT', '')
-          : null;
+        const dateStr = b.market_end_time ? new Date(Number(b.market_end_time) * 1000).toUTCString().replace(' GMT', '') : null;
         msg += `${statusEmoji} ${title}\n`;
-        msg += `   ${side} • $${b.amount_usdc} USDC • ${b.shares || '?'} shares\n`;
+        msg += `   ${side} • ${parseFloat(b.amount_usdc || 0).toFixed(2)} USDC • ${b.shares || '?'} shares\n`;
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
-        const statusLabel = b.status === 'claimed' ? 'claimed ✅' : b.status;
-        msg += `   Status: ${statusLabel}\n`;
-        if (b.status === 'claimed' && (b.claim_signature || b.signature)) {
-          const txSig = b.claim_signature || b.signature;
-          msg += `   [View on Solscan](https://solscan.io/tx/${txSig})\n`;
+        if (b._onChain) {
+          msg += `   Status: ${b.status === 'on-chain' ? 'active ⛓️' : b.status}\n`;
+        } else {
+          msg += `   Status: ${b.status === 'claimed' ? 'claimed ✅' : b.status}\n`;
+          if (b.status === 'claimed' && (b.claim_signature || b.signature)) {
+            msg += `   [View on Solscan](https://solscan.io/tx/${b.claim_signature || b.signature})\n`;
+          }
         }
         msg += '\n';
       }
     }
 
-    const wonBets = bets.filter(b => b.status === 'won');
+    const wonBets = dbBets.filter(b => b.status === 'won');
     const keyboard = { inline_keyboard: [] };
     if (wonBets.length) {
       keyboard.inline_keyboard.push([{ text: `🏆 Claim Winnings (${wonBets.length} bet${wonBets.length > 1 ? 's' : ''})`, callback_data: 'claim_winnings' }]);
@@ -996,9 +885,7 @@ bot.action('claim_winnings', async (ctx) => {
     const keypair = decryptKeypair(user.encrypted_keypair);
     const wallet = user.wallet_address;
 
-    let claimed = 0;
-    let failed = 0;
-    let totalMsg = '';
+    let claimed = 0, failed = 0, totalMsg = '';
 
     for (const b of wonBets) {
       try {
@@ -1007,19 +894,16 @@ bot.action('claim_winnings', async (ctx) => {
         const claimSig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
         await updateBetStatus(b.order_id, 'claimed', claimSig);
         claimed++;
-        const title = (b.market_title || b.market_id).slice(0, 40);
-        totalMsg += `✅ ${title}\n   TX: \`${claimSig.slice(0,20)}...\`\n\n`;
+        totalMsg += `✅ ${(b.market_title || b.market_id).slice(0, 40)}\n   TX: \`${claimSig.slice(0,20)}...\`\n\n`;
       } catch (err) {
         failed++;
         console.error('Claim failed for bet', b.order_id, err.message);
       }
     }
 
-    let resultMsg = `🏆 Claims Complete!\n\n`;
-    resultMsg += `✅ Claimed: ${claimed}\n`;
+    let resultMsg = `🏆 Claims Complete!\n\n✅ Claimed: ${claimed}\n`;
     if (failed) resultMsg += `❌ Failed: ${failed}\n`;
-    resultMsg += `\n${totalMsg}`;
-    resultMsg += `💰 Winnings are now in your wallet.`;
+    resultMsg += `\n${totalMsg}💰 Winnings are now in your wallet.`;
 
     await ctx.editMessageText(resultMsg, {
       parse_mode: 'Markdown',
@@ -1048,48 +932,35 @@ bot.action('my_bets_created', async (ctx) => {
       creates = all.filter(m => m.wallet === user.wallet_address);
     } catch (_) {}
     const dbMarkets = await getUserMarkets(userId);
-
     const dbTitleMap = {};
     dbMarkets.forEach(m => { dbTitleMap[m.market_id] = m.title; });
-
     const markets = creates.length ? creates : dbMarkets.map(m => ({ eventPda: m.market_id, title: m.title }));
 
     let msg = '🏛️ Markets You Created\n\n';
-
     if (!markets.length) {
       msg += 'No markets created yet.\n\nUse /createmarket to create your first prediction market.';
-      await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [
-        [{ text: '⬅️ Back', callback_data: 'my_bets' }],
-      ]}});
+      await ctx.editMessageText(msg, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'my_bets' }]] }});
       return;
     }
 
-    msg += `Total Created: ${markets.length}\n\n`;
-    msg += '━━━━━━━━━━━━━━━\n\n';
-
+    msg += `Total Created: ${markets.length}\n\n━━━━━━━━━━━━━━━\n\n`;
     let hasClaimableFees = false;
 
     for (const m of markets.slice(0, 10)) {
       const marketId = m.eventPda || m.market_id;
       let liveData = null;
       try { liveData = await getCachedMarket(marketId); } catch (_) {}
-
       const phase = liveData?.phase || 'unknown';
       const vol = liveData?.volumeUsdc || '0';
       const title = dbTitleMap[marketId] || liveData?.question || liveData?.title || marketId.slice(0, 12) + '...';
       const statusEmoji = phase === 'secondary' ? '🟢' : phase === 'resolved' ? '✅' : phase === 'cancelled' ? '❌' : '⏳';
-
-      msg += `${statusEmoji} ${title}\n`;
-      msg += `   Phase: ${phase} | Vol: $${vol}\n`;
-      msg += `   [View on Panta](${SITE_BASE}${marketId})\n`;
-
+      msg += `${statusEmoji} ${title}\n   Phase: ${phase} | Vol: $${vol}\n   [View on Panta](${SITE_BASE}${marketId})\n`;
       if (phase === 'secondary' || phase === 'secondary_active') {
         try {
           const feeCheck = await buildCreatorFeeClaim({ wallet: user.wallet_address, marketId });
           const feesUsdc = feeCheck.claimableFeesUsdc;
           if (feesUsdc && feesUsdc !== '0') {
-            const feesFormatted = (parseInt(feesUsdc) / 1e6).toFixed(2);
-            msg += `   💰 Claimable Fees: $${feesFormatted} USDC\n`;
+            msg += `   💰 Claimable Fees: $${(parseInt(feesUsdc) / 1e6).toFixed(2)} USDC\n`;
             hasClaimableFees = true;
           }
         } catch (_) {}
@@ -1098,11 +969,8 @@ bot.action('my_bets_created', async (ctx) => {
     }
 
     const keyboard = { inline_keyboard: [] };
-    if (hasClaimableFees) {
-      keyboard.inline_keyboard.push([{ text: '💰 Claim Creator Fees', callback_data: 'claim_creator_fees' }]);
-    }
+    if (hasClaimableFees) keyboard.inline_keyboard.push([{ text: '💰 Claim Creator Fees', callback_data: 'claim_creator_fees' }]);
     keyboard.inline_keyboard.push([{ text: '⬅️ Back', callback_data: 'my_bets' }]);
-
     await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
   } catch (err) {
     console.error('ERROR my_bets_created:', err.message);
@@ -1120,41 +988,32 @@ bot.action('claim_creator_fees', async (ctx) => {
     const keypair = decryptKeypair(user.encrypted_keypair);
     const wallet = user.wallet_address;
     const markets = await getUserMarkets(userId);
-
     await ctx.editMessageText('⏳ Claiming creator fees...');
 
-    let claimed = 0;
-    let failed = 0;
-    let totalMsg = '';
-
+    let claimed = 0, failed = 0, totalMsg = '';
     for (const m of markets) {
       try {
         const built = await buildCreatorFeeClaim({ wallet, marketId: m.market_id });
         if (!built.claimableFeesUsdc || built.claimableFeesUsdc === '0') continue;
         const signature = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
-        const feesFormatted = (parseInt(built.claimableFeesUsdc) / 1e6).toFixed(2);
         claimed++;
-        totalMsg += `✅ ${m.title.slice(0, 40)}\n   $${feesFormatted} USDC | [Solscan](https://solscan.io/tx/${signature})\n\n`;
+        totalMsg += `✅ ${m.title.slice(0, 40)}\n   $${(parseInt(built.claimableFeesUsdc) / 1e6).toFixed(2)} USDC | [Solscan](https://solscan.io/tx/${signature})\n\n`;
       } catch (err) {
         const msg = err.response?.data?.code;
         if (msg === 'NO_CREATOR_FEES' || msg === 'MARKET_NOT_GRADUATED') continue;
         failed++;
-        console.error('Creator fee claim failed:', m.market_id, err.message);
       }
     }
 
     if (!claimed) {
-      await ctx.editMessageText('💰 No creator fees to claim right now.\n\nFees accumulate on graduated (P2P) markets with trading activity.',
+      await ctx.editMessageText('💰 No creator fees to claim right now.',
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: 'my_bets_created' }]] } });
       return;
     }
 
-    let resultMsg = `💰 Creator Fees Claimed!\n\n`;
-    resultMsg += `✅ Claimed from ${claimed} market${claimed > 1 ? 's' : ''}\n`;
+    let resultMsg = `💰 Creator Fees Claimed!\n\n✅ Claimed from ${claimed} market${claimed > 1 ? 's' : ''}\n`;
     if (failed) resultMsg += `❌ Failed: ${failed}\n`;
-    resultMsg += `\n${totalMsg}`;
-    resultMsg += `Money is now in your wallet.`;
-
+    resultMsg += `\n${totalMsg}Money is now in your wallet.`;
     await ctx.editMessageText(resultMsg, {
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: [
@@ -1193,8 +1052,7 @@ bot.on('photo', async (ctx) => {
     const photo = photos[photos.length - 1];
     const fileLink = await ctx.telegram.getFileLink(photo.file_id);
     const imgRes = await require('axios').get(fileLink.href, { responseType: 'arraybuffer' });
-    const imageBuffer = Buffer.from(imgRes.data);
-    const imageUrl = await uploadMarketImage(imageBuffer, 'market.jpg');
+    const imageUrl = await uploadMarketImage(Buffer.from(imgRes.data), 'market.jpg');
     mc.imageUrl = imageUrl;
     mc.step = 'category';
     await ctx.reply('✅ Image uploaded! Now Step 4 of 7: Choose a category:', {
@@ -1208,9 +1066,7 @@ bot.on('photo', async (ctx) => {
   } catch (err) {
     console.error('ERROR photo upload:', err.message);
     await ctx.reply('❌ Image upload failed. Tap Skip to use the default image instead.', {
-      reply_markup: { inline_keyboard: [
-        [{ text: '⏭️ Skip (use default)', callback_data: 'mc_skip_image' }],
-      ]}
+      reply_markup: { inline_keyboard: [[{ text: '⏭️ Skip (use default)', callback_data: 'mc_skip_image' }]] }
     });
   }
 });
@@ -1225,57 +1081,6 @@ bot.on('text', async (ctx) => {
     if (text.startsWith('/')) return;
     if (!isPrivate) return;
 
-    // ── WALLET IMPORT ── must check first so private key isn't logged
-    if (st.importingWallet) {
-      // Immediately delete the message containing the private key
-      try { await ctx.deleteMessage(); } catch (_) {}
-
-      delete st.importingWallet;
-
-      let keypair;
-      try {
-        const secretKey = bs58.decode(text);
-        const { Keypair } = require('@solana/web3.js');
-        keypair = Keypair.fromSecretKey(secretKey);
-      } catch (e) {
-        await ctx.reply('❌ Invalid private key. Make sure it is a valid base58 Solana private key.', {
-          reply_markup: { inline_keyboard: [[{ text: '🔄 Try Again', callback_data: 'import_wallet_start' }, { text: '⬅️ Cancel', callback_data: 'view_wallet' }]] }
-        });
-        return;
-      }
-
-      const walletAddress = keypair.publicKey.toString();
-      const encKeypair = encryptKeypair(keypair);
-
-      // Check if this wallet is already saved
-      const existingWallets = await getUserWallets(userId);
-      const alreadyExists = existingWallets.find(w => w.wallet_address === walletAddress);
-      if (alreadyExists) {
-        // Just switch to it
-        await switchWallet(userId, walletAddress);
-        await ctx.reply(
-          `✅ Wallet already in your list — switched to it!\n\n📍 \`${walletAddress}\`\n\nThis wallet is now active.`,
-          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '💰 View Wallet', callback_data: 'view_wallet' }]] } }
-        );
-        return;
-      }
-
-      // Save as imported wallet (activates it)
-      await addWallet(userId, walletAddress, encKeypair, 'Imported', true);
-
-      await ctx.reply(
-        `✅ Wallet Imported & Active!\n\n📍 Address: \`${walletAddress}\`\n\n` +
-        `⚠️ Your message with the private key has been deleted.\n` +
-        `⚠️ Please delete any copies of your key from your clipboard or notes.\n\n` +
-        `All bets, claims, and withdrawals now use this wallet.`,
-        { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
-          [{ text: '💰 View Wallet', callback_data: 'view_wallet' }],
-          [{ text: '🔄 Switch Wallet', callback_data: 'switch_wallet' }],
-        ]}}
-      );
-      return;
-    }
-
     if (st.deleteInProgress) {
       if (text === 'Delete') {
         await deleteUserWallet(userId);
@@ -1288,6 +1093,130 @@ bot.on('text', async (ctx) => {
         await ctx.reply('❌ Incorrect. Type "Delete" to confirm.');
       }
       return;
+    }
+
+    // Dispute flow: reason step
+    if (st.dispute) {
+      const d = st.dispute;
+      if (d.step === 'reason') {
+        d.reason = text;
+        d.step = 'evidence';
+        await ctx.reply(
+          `📝 Dispute reason noted.\n\nNow provide evidence URLs (comma-separated, up to 5):\n_e.g. https://source1.com, https://source2.com_`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `mkt_${d.marketId}` }]] }}
+        );
+        return;
+      }
+      if (d.step === 'evidence') {
+        const evidence = text.split(',').map(s => s.trim()).filter(Boolean).slice(0, 5);
+        const { marketId, side, reason } = d;
+        delete st.dispute;
+        try {
+          const user = await getUser(userId);
+          if (!user?.wallet_address || !user?.encrypted_keypair) { await ctx.reply('No wallet.'); return; }
+          const keypair = decryptKeypair(user.encrypted_keypair);
+          await ctx.reply('⏳ Filing dispute...');
+          const built = await buildDispute({ wallet: user.wallet_address, marketId, reason, evidence, side });
+          const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+          const submitted = await submitDispute({ marketId, disputeId: built.disputeId, wallet: user.wallet_address, signature: sig });
+          await ctx.reply(
+            `✅ Dispute Filed!\n\nMarket: ${marketId.slice(0, 16)}...\nSide: ${side.toUpperCase()}\nStatus: ${submitted.status}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+              [{ text: '📊 Check Status', callback_data: `dispute_status_${marketId}` }],
+            ]}}
+          );
+        } catch (err) {
+          const code = err.response?.data?.code || err.message;
+          await ctx.reply(`❌ Dispute failed: ${code}`);
+        }
+        return;
+      }
+    }
+
+    // Secondary market: sell shares flow
+    if (st.sellShares) {
+      const ss = st.sellShares;
+      if (ss.step === 'price') {
+        const price = parseFloat(text);
+        if (isNaN(price) || price <= 0 || price >= 1) {
+          await ctx.reply('❌ Invalid price. Enter a number between 0 and 1 (e.g. 0.42).');
+          return;
+        }
+        ss.price = text;
+        ss.step = 'shares';
+        await ctx.reply(
+          `💰 Selling ${ss.side.toUpperCase()} @ $${price}\n\nHow many shares do you want to list?\n_e.g. 5.00_`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `ob_${ss.marketId}` }]] }}
+        );
+        return;
+      }
+      if (ss.step === 'shares') {
+        const shares = parseFloat(text);
+        if (isNaN(shares) || shares <= 0) { await ctx.reply('❌ Invalid amount.'); return; }
+        const { marketId, side, price } = ss;
+        delete st.sellShares;
+        try {
+          const user = await getUser(userId);
+          if (!user?.wallet_address || !user?.encrypted_keypair) { await ctx.reply('No wallet.'); return; }
+          const keypair = decryptKeypair(user.encrypted_keypair);
+          await ctx.reply('⏳ Listing shares...');
+          const built = await buildListShares({ wallet: user.wallet_address, marketId, side, price, shares: String(shares), userId: String(userId) });
+          const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+          await ctx.reply(
+            `✅ Shares Listed!\n\n${side.toUpperCase()} x${shares} @ $${price}\nListing ID: ${built.listingId}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+              [{ text: '📖 Order Book', callback_data: `ob_${marketId}` }],
+              [{ text: '❌ Cancel Listing', callback_data: `cancel_order_${marketId}_${built.listingId}` }],
+            ]}}
+          );
+        } catch (err) {
+          await ctx.reply(`❌ List failed: ${err.response?.data?.code || err.message}`);
+        }
+        return;
+      }
+    }
+
+    // Secondary market: place bid flow
+    if (st.placeBid) {
+      const pb = st.placeBid;
+      if (pb.step === 'price') {
+        const price = parseFloat(text);
+        if (isNaN(price) || price <= 0 || price >= 1) {
+          await ctx.reply('❌ Invalid price. Enter a number between 0 and 1 (e.g. 0.35).');
+          return;
+        }
+        pb.price = text;
+        pb.step = 'shares';
+        await ctx.reply(
+          `🤝 Bidding ${pb.side.toUpperCase()} @ $${price}\n\nHow many shares do you want to bid for?\n_Cost will be shares × price USDC_`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `ob_${pb.marketId}` }]] }}
+        );
+        return;
+      }
+      if (pb.step === 'shares') {
+        const shares = parseFloat(text);
+        if (isNaN(shares) || shares <= 0) { await ctx.reply('❌ Invalid amount.'); return; }
+        const { marketId, side, price } = pb;
+        delete st.placeBid;
+        try {
+          const user = await getUser(userId);
+          if (!user?.wallet_address || !user?.encrypted_keypair) { await ctx.reply('No wallet.'); return; }
+          const keypair = decryptKeypair(user.encrypted_keypair);
+          await ctx.reply('⏳ Placing bid...');
+          const built = await buildRestBid({ wallet: user.wallet_address, marketId, side, price, shares: String(shares), userId: String(userId) });
+          const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+          await ctx.reply(
+            `✅ Bid Placed!\n\n${side.toUpperCase()} x${shares} @ $${price}\nMax Cost: $${built.maxCostUsdc} USDC\nListing ID: ${built.listingId}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+              [{ text: '📖 Order Book', callback_data: `ob_${marketId}` }],
+              [{ text: '❌ Cancel Bid', callback_data: `cancel_order_${marketId}_${built.listingId}` }],
+            ]}}
+          );
+        } catch (err) {
+          await ctx.reply(`❌ Bid failed: ${err.response?.data?.code || err.message}`);
+        }
+        return;
+      }
     }
 
     if (st.selectedToken && !st.withdrawalAmount) {
@@ -1316,32 +1245,24 @@ bot.on('text', async (ctx) => {
     if (st.bet && st.bet.step === 'amount') {
       const amount = parseFloat(text);
       if (isNaN(amount) || amount <= 0) { await ctx.reply('❌ Invalid amount. Enter a number.'); return; }
-
       const user = await getUser(userId);
-      const betTitle = st.bet.title || 'this market';
-
       await ctx.reply('⏳ Getting quote from Panta...');
       try {
         const quote = await quotePrimaryBuy({
-          wallet: user.wallet_address,
-          marketId: st.bet.marketId,
-          side: st.bet.side,
-          amountUsdc: String(amount),
-          userId: String(userId),
+          wallet: user.wallet_address, marketId: st.bet.marketId,
+          side: st.bet.side, amountUsdc: String(amount), userId: String(userId),
         });
         st.bet.quote = quote;
         st.bet.amount = amount;
         st.bet.step = 'confirm';
-
         await ctx.reply(
-          `✅ Confirm Bet\n\n📊 ${betTitle}\nSide: ${st.bet.side === 'yes' ? 'YES ✅' : 'NO ❌'}\nAmount: ${amount} USDC\nEst. Shares: ${quote.shares}\nAvg Price: ${quote.avgPrice}\nFee: ${quote.feeUsdc} USDC\n\nApprove to place your bet on-chain.`,
+          `✅ Confirm Bet\n\n📊 ${st.bet.title || 'this market'}\nSide: ${st.bet.side === 'yes' ? 'YES ✅' : 'NO ❌'}\nAmount: ${amount} USDC\nEst. Shares: ${quote.shares}\nAvg Price: ${quote.avgPrice}\nFee: ${quote.feeUsdc} USDC\n\nApprove to place your bet on-chain.`,
           { reply_markup: { inline_keyboard: [
             [{ text: '✅ Confirm & Sign', callback_data: 'confirm_bet' }],
             [{ text: '❌ Cancel', callback_data: 'cancel_bet' }],
           ]}});
       } catch (err) {
-        const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-        await ctx.reply(`❌ Could not get quote:\n${detail}`);
+        await ctx.reply(`❌ Could not get quote:\n${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
         delete st.bet;
       }
       return;
@@ -1349,11 +1270,7 @@ bot.on('text', async (ctx) => {
 
     if (ctx.session && ctx.session.marketCreation) {
       const mc = ctx.session.marketCreation;
-      if (mc.step === 'title') {
-        mc.title = text; mc.step = 'description';
-        await ctx.reply('Step 2 of 5: Send the market DESCRIPTION');
-        return;
-      }
+      if (mc.step === 'title') { mc.title = text; mc.step = 'description'; await ctx.reply('Step 2 of 5: Send the market DESCRIPTION'); return; }
       if (mc.step === 'description') {
         mc.description = text; mc.step = 'image';
         await ctx.reply('Step 3 of 7: Send a photo for your market, or skip to use the default image.', {
@@ -1364,39 +1281,29 @@ bot.on('text', async (ctx) => {
         });
         return;
       }
-      if (mc.step === 'yesCondition') {
-        mc.yesCondition = text.replace(/^this market will resolve yes if:?\s*/i, ''); mc.step = 'noCondition';
-        await ctx.reply('Step 6 of 7: Complete this line —\n\n"This market will resolve NO if: ..."');
-        return;
-      }
+      if (mc.step === 'yesCondition') { mc.yesCondition = text.replace(/^this market will resolve yes if:?\s*/i, ''); mc.step = 'noCondition'; await ctx.reply('Step 6 of 7: Complete this line —\n\n"This market will resolve NO if: ..."'); return; }
       if (mc.step === 'noCondition') {
         mc.noCondition = text.replace(/^this market will resolve no if:?\s*/i, ''); mc.step = 'timezone';
-        await ctx.reply('Step 7 of 7: Choose the timezone for the market END time:',
-          { reply_markup: { inline_keyboard: [
-            [{ text: 'UTC', callback_data: 'tz_utc' }, { text: 'WAT (Lagos)', callback_data: 'tz_wat' }],
-            [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
-          ]}});
+        await ctx.reply('Step 7 of 7: Choose the timezone for the market END time:', { reply_markup: { inline_keyboard: [
+          [{ text: 'UTC', callback_data: 'tz_utc' }, { text: 'WAT (Lagos)', callback_data: 'tz_wat' }],
+          [{ text: 'Cancel', callback_data: 'cancel_market_creation' }],
+        ]}});
         return;
       }
       if (mc.step === 'time') {
         const m = text.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$/);
-        if (!m) { await ctx.reply('❌ Invalid format. Use YYYY-MM-DD HH:MM (e.g. 2027-01-01 15:00)'); return; }
+        if (!m) { await ctx.reply('❌ Invalid format. Use YYYY-MM-DD HH:MM'); return; }
         const [, Y, Mo, D, H, Mi] = m;
         let utcMs = Date.UTC(+Y, +Mo - 1, +D, +H, +Mi, 0);
         if (mc.timezone === 'WAT') utcMs -= 3600 * 1000;
         const endTime = Math.floor(utcMs / 1000);
         if (endTime <= Math.floor(Date.now() / 1000)) { await ctx.reply('❌ End time must be in the future.'); return; }
-        mc.endTime = endTime;
-        mc.endTimeText = text;
-        mc.step = 'markettype';
-
-        await ctx.reply(
-          'Choose the market type:\n\n⚡ Breaking — $20 USDC fee\n📊 Standard — $50 USDC fee\n\n(Both need a little SOL for gas)',
-          { reply_markup: { inline_keyboard: [
-            [{ text: '⚡ Breaking ($20)', callback_data: 'mtype_breaking' }],
-            [{ text: '📊 Standard ($50)', callback_data: 'mtype_standard' }],
-            [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
-          ]}});
+        mc.endTime = endTime; mc.endTimeText = text; mc.step = 'markettype';
+        await ctx.reply('Choose the market type:\n\n⚡ Breaking — $20 USDC fee\n📊 Standard — $50 USDC fee', { reply_markup: { inline_keyboard: [
+          [{ text: '⚡ Breaking ($20)', callback_data: 'mtype_breaking' }],
+          [{ text: '📊 Standard ($50)', callback_data: 'mtype_standard' }],
+          [{ text: '❌ Cancel', callback_data: 'cancel_market_creation' }],
+        ]}});
         return;
       }
     }
@@ -1413,6 +1320,245 @@ bot.catch((err) => console.error('BOT ERROR:', err));
 
 const server = http.createServer((req, res) => { res.writeHead(200); res.end('PinkPanta bot running'); });
 server.listen(PORT, () => console.log(`[${new Date().toISOString()}] Listening on ${PORT}`));
+
+// ─── Secondary Market Handlers ───────────────────────────────────────────────
+
+bot.action(/^ob_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const marketId = ctx.match[1];
+    const ob = await getOrderBook(marketId);
+    const items = ob.items || [];
+    const market = await getCachedMarket(marketId);
+    const question = market?.question || marketId;
+
+    let msg = `📖 Order Book\n${question.slice(0, 60)}\n\n━━━━━━━━━━━━━━━\n`;
+    const asks = items.filter(i => i.intent === 'sell');
+    const bids = items.filter(i => i.intent === 'buy');
+
+    if (!asks.length && !bids.length) {
+      msg += 'No open orders on this market.';
+    } else {
+      if (asks.length) {
+        msg += `📤 *Asks (Sell)* — ${asks.length} open\n`;
+        for (const a of asks.slice(0, 5)) {
+          msg += `   ${a.side === 'yes' ? 'YES' : 'NO'} @ ${parseFloat(a.price).toFixed(3)} — ${(parseFloat(a.shares) - parseFloat(a.filledShares || 0)).toFixed(2)} shares\n`;
+        }
+        msg += '\n';
+      }
+      if (bids.length) {
+        msg += `📥 *Bids (Buy)* — ${bids.length} open\n`;
+        for (const b of bids.slice(0, 5)) {
+          msg += `   ${b.side === 'yes' ? 'YES' : 'NO'} @ ${parseFloat(b.price).toFixed(3)} — ${(parseFloat(b.shares) - parseFloat(b.filledShares || 0)).toFixed(2)} shares\n`;
+        }
+      }
+    }
+
+    const keyboard = { inline_keyboard: [
+      [{ text: '💰 Sell Shares', callback_data: `sell_shares_${marketId}` }, { text: '🤝 Place Bid', callback_data: `place_bid_${marketId}` }],
+      [{ text: '⚖️ Dispute Resolution', callback_data: `dispute_${marketId}` }],
+    ]};
+    if (asks.length) {
+      keyboard.inline_keyboard.splice(1, 0, [{ text: `⚡ Fill Best Ask (${asks[0].side?.toUpperCase()} @ ${parseFloat(asks[0].price).toFixed(3)})`, callback_data: `fill_${marketId}_${asks[0].listingId}` }]);
+    }
+    keyboard.inline_keyboard.push([{ text: '⬅️ Back to Market', callback_data: `mkt_${marketId}` }]);
+
+    await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: keyboard });
+  } catch (err) {
+    console.error('ERROR ob:', err.message);
+    await ctx.answerCbQuery('Error loading order book', true);
+  }
+});
+
+bot.action(/^sell_shares_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const marketId = ctx.match[1];
+    const st = userState[ctx.from.id] || (userState[ctx.from.id] = {});
+    st.sellShares = { marketId, step: 'side' };
+    const market = await getCachedMarket(marketId);
+    await ctx.editMessageText(
+      `💰 Sell Shares\n${(market?.question || marketId).slice(0, 60)}\n\nWhich side do you want to sell?`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: 'YES shares', callback_data: `ss_side_yes_${marketId}` }, { text: 'NO shares', callback_data: `ss_side_no_${marketId}` }],
+        [{ text: '❌ Cancel', callback_data: `ob_${marketId}` }],
+      ]}}
+    );
+  } catch (err) { await ctx.answerCbQuery('Error', true); }
+});
+
+bot.action(/^ss_side_(yes|no)_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const side = ctx.match[1]; const marketId = ctx.match[2];
+    const st = userState[ctx.from.id] || (userState[ctx.from.id] = {});
+    st.sellShares = { marketId, side, step: 'price' };
+    await ctx.editMessageText(
+      `💰 Sell ${side.toUpperCase()} Shares\n\nEnter the price per share (0 < price < 1 USDC):\n_e.g. 0.42_`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `ob_${marketId}` }]] }}
+    );
+  } catch (err) { await ctx.answerCbQuery('Error', true); }
+});
+
+bot.action(/^place_bid_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const marketId = ctx.match[1];
+    const st = userState[ctx.from.id] || (userState[ctx.from.id] = {});
+    st.placeBid = { marketId, step: 'side' };
+    const market = await getCachedMarket(marketId);
+    await ctx.editMessageText(
+      `🤝 Place Bid\n${(market?.question || marketId).slice(0, 60)}\n\nWhich side do you want to bid on?`,
+      { reply_markup: { inline_keyboard: [
+        [{ text: 'YES', callback_data: `pb_side_yes_${marketId}` }, { text: 'NO', callback_data: `pb_side_no_${marketId}` }],
+        [{ text: '❌ Cancel', callback_data: `ob_${marketId}` }],
+      ]}}
+    );
+  } catch (err) { await ctx.answerCbQuery('Error', true); }
+});
+
+bot.action(/^pb_side_(yes|no)_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const side = ctx.match[1]; const marketId = ctx.match[2];
+    const st = userState[ctx.from.id] || (userState[ctx.from.id] = {});
+    st.placeBid = { marketId, side, step: 'price' };
+    await ctx.editMessageText(
+      `🤝 Bid ${side.toUpperCase()}\n\nEnter your bid price per share (0 < price < 1 USDC):\n_e.g. 0.35_`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `ob_${marketId}` }]] }}
+    );
+  } catch (err) { await ctx.answerCbQuery('Error', true); }
+});
+
+bot.action(/^fill_(.+?)_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery('Building transaction...');
+    const marketId = ctx.match[1]; const listingId = ctx.match[2];
+    const user = await getUser(ctx.from.id);
+    if (!user?.wallet_address || !user?.encrypted_keypair) { await ctx.reply('No wallet found.'); return; }
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    await ctx.reply('⏳ Filling order...');
+    const built = await buildFillOrder({ wallet: user.wallet_address, marketId, listingId, userId: String(ctx.from.id) });
+    const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+    await ctx.reply(
+      `✅ Order Filled!\n\n${built.intent === 'buy' ? 'Bought' : 'Sold'} ${built.shares} shares @ ${built.price}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '📖 Order Book', callback_data: `ob_${marketId}` }]] }}
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Fill failed: ${err.response?.data?.code || err.message}`);
+  }
+});
+
+bot.action(/^cancel_order_(.+?)_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery('Cancelling...');
+    const marketId = ctx.match[1]; const listingId = ctx.match[2];
+    const user = await getUser(ctx.from.id);
+    if (!user?.wallet_address || !user?.encrypted_keypair) { await ctx.reply('No wallet found.'); return; }
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    await ctx.reply('⏳ Cancelling order...');
+    const built = await buildCancelOrder({ wallet: user.wallet_address, marketId, listingId });
+    const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+    await ctx.reply(
+      `✅ Order Cancelled!\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '📖 Order Book', callback_data: `ob_${marketId}` }]] }}
+    );
+  } catch (err) {
+    await ctx.reply(`❌ Cancel failed: ${err.response?.data?.code || err.message}`);
+  }
+});
+
+// ─── Dispute Handlers ─────────────────────────────────────────────────────────
+
+// Show dispute menu for a market
+bot.action(/^dispute_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const marketId = ctx.match[1];
+    const userId = ctx.from.id;
+    const user = await getUser(userId);
+
+    // Check existing dispute status first
+    let existingDispute = null;
+    if (user?.wallet_address) {
+      try { existingDispute = await getDisputeStatus({ marketId, wallet: user.wallet_address }); } catch (_) {}
+    }
+
+    const market = await getCachedMarket(marketId);
+    const question = (market?.question || marketId).slice(0, 60);
+
+    let msg = `⚖️ Dispute Resolution\n${question}\n\n`;
+
+    if (existingDispute && existingDispute.status) {
+      const statusEmoji = { pending: '⏳', accepted: '✅', rejected: '❌', expired: '💨' }[existingDispute.status] || '❓';
+      msg += `Your dispute: ${statusEmoji} ${existingDispute.status.toUpperCase()}\n`;
+      if (existingDispute.submittedAt) msg += `Filed: ${new Date(existingDispute.submittedAt).toUTCString()}\n`;
+      if (existingDispute.outcome) msg += `Outcome: ${existingDispute.outcome.toUpperCase()}\n`;
+      msg += '\n_Disputes are reviewed on-chain. Reason and evidence are stored off-chain._';
+      await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+        [{ text: '⬅️ Back', callback_data: `ob_${marketId}` }],
+      ]}});
+    } else {
+      msg += `You can dispute the oracle's proposed resolution during the 1-hour window after the market ends.\n\n`;
+      msg += `⚠️ Filing a dispute locks a USDC bond (refunded if your side wins).\n\nWhich side do you believe should win?`;
+      await ctx.editMessageText(msg, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+        [{ text: '✅ YES should win', callback_data: `dispute_side_yes_${marketId}` }, { text: '❌ NO should win', callback_data: `dispute_side_no_${marketId}` }],
+        [{ text: '⬅️ Back', callback_data: `ob_${marketId}` }],
+      ]}});
+    }
+  } catch (err) {
+    console.error('ERROR dispute menu:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action(/^dispute_side_(yes|no)_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const side = ctx.match[1];
+    const marketId = ctx.match[2];
+    const userId = ctx.from.id;
+    const st = userState[userId] || (userState[userId] = {});
+    st.dispute = { marketId, side, step: 'reason' };
+
+    await ctx.editMessageText(
+      `⚖️ Disputing — ${side.toUpperCase()} should win\n\nProvide your reason (1-2000 characters):\n_Explain why the oracle resolution is incorrect_`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '❌ Cancel', callback_data: `dispute_${marketId}` }]] }}
+    );
+  } catch (err) {
+    console.error('ERROR dispute_side:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
+
+bot.action(/^dispute_status_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const marketId = ctx.match[1];
+    const user = await getUser(ctx.from.id);
+    if (!user?.wallet_address) { await ctx.reply('No wallet found.'); return; }
+    const status = await getDisputeStatus({ marketId, wallet: user.wallet_address });
+    const statusEmoji = { pending: '⏳', accepted: '✅', rejected: '❌', expired: '💨' }[status.status] || '❓';
+    let msg = `⚖️ Dispute Status\n\n${statusEmoji} ${(status.status || 'unknown').toUpperCase()}\n`;
+    if (status.submittedAt) msg += `Filed: ${new Date(status.submittedAt).toUTCString()}\n`;
+    if (status.resolvedAt) msg += `Resolved: ${new Date(status.resolvedAt).toUTCString()}\n`;
+    if (status.outcome) msg += `Outcome: ${status.outcome.toUpperCase()}\n`;
+    await ctx.reply(msg, { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: `ob_${marketId}` }]] }});
+  } catch (err) {
+    const code = err.response?.data?.code || err.message;
+    await ctx.reply(`❌ Could not fetch dispute status: ${code}`);
+  }
+});
 
 async function startup() {
   try {
@@ -1443,3 +1589,91 @@ startup();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+bot.action(/^intel_(.+)$/, async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery('Loading intelligence...');
+    const marketId = ctx.match[1];
+
+    let intel;
+    try {
+      intel = await getMarketIntelligence(marketId);
+    } catch (err) {
+      const code = err.response?.data?.code || err.message;
+      await ctx.editMessageText(`❌ Could not load intelligence: ${code}`, {
+        reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: `mkt_${marketId}` }]] },
+      });
+      return;
+    }
+
+    const market = await getCachedMarket(marketId).catch(() => ({}));
+    const question = (market?.question || marketId).slice(0, 60);
+
+    const phaseEmoji = { created: '🕐', mid_market: '📊', post_resolution: '✅' }[intel.phase] || '📋';
+    const statusLabel = intel.status === 'ready' ? '✅ Ready' : '⏳ Pending';
+
+    let msg = `🧠 Panta Intelligence\n${question}\n\n`;
+    msg += `${phaseEmoji} Phase: ${intel.phase || '—'}  |  ${statusLabel}\n`;
+
+    if (intel.phase === 'post_resolution' && intel.outcome) {
+      const outcomeEmoji = intel.outcome === 'yes' ? '✅' : '❌';
+      msg += `\n📌 *Resolution Summary*\n`;
+      msg += `Outcome: ${outcomeEmoji} ${intel.outcome.toUpperCase()}\n`;
+      if (intel.resolvedAt) msg += `Settled: ${new Date(intel.resolvedAt).toUTCString()}\n`;
+      if (intel.headline) msg += `\n*${intel.headline}*\n`;
+      if (intel.summary) msg += `\n${intel.summary}\n`;
+    }
+
+    if (intel.insights && intel.insights.length) {
+      msg += `\n💡 *Insights*\n`;
+      intel.insights.slice(0, 3).forEach(i => { msg += `• ${i}\n`; });
+    }
+
+    if (intel.bullishFactors && intel.bullishFactors.length) {
+      msg += `\n📈 *Bullish Factors*\n`;
+      intel.bullishFactors.slice(0, 3).forEach(f => { msg += `• ${f}\n`; });
+    }
+
+    if (intel.bearishFactors && intel.bearishFactors.length) {
+      msg += `\n📉 *Bearish Factors*\n`;
+      intel.bearishFactors.slice(0, 3).forEach(f => { msg += `• ${f}\n`; });
+    }
+
+    if (intel.risks && intel.risks.length) {
+      msg += `\n⚠️ *Risks*\n`;
+      intel.risks.slice(0, 2).forEach(r => { msg += `• ${r}\n`; });
+    }
+
+    if (intel.historicalContext) {
+      msg += `\n📚 *Context*\n${intel.historicalContext}\n`;
+    }
+
+    if (intel.sources && intel.sources.length) {
+      msg += `\n🔗 *Sources*\n`;
+      intel.sources.slice(0, 3).forEach(s => {
+        msg += `• [${s.title || s.publisher}](${s.url})\n`;
+      });
+    }
+
+    if (intel.analysisDisclaimer) {
+      msg += `\n_${intel.analysisDisclaimer}_`;
+    }
+
+    if (intel.updatedAt) {
+      msg += `\n\n_Updated: ${new Date(intel.updatedAt).toUTCString()}_`;
+    }
+
+    await ctx.editMessageText(msg, {
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [
+        [{ text: '🔄 Refresh', callback_data: `intel_${marketId}` }],
+        [{ text: '⬅️ Back to Market', callback_data: `mkt_${marketId}` }],
+      ]},
+    });
+  } catch (err) {
+    console.error('ERROR intel:', err.message);
+    await ctx.answerCbQuery('Error', true);
+  }
+});
