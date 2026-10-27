@@ -212,7 +212,7 @@ async function showMarkets(ctx, edit = false) {
     return [{ text: `${q}${tag}`, callback_data: `mkt_${m.marketId}` }];
   });
 
-  const header = '📊 Live markets\n🟢 = bet here  |  🔗 = trade on Panta\n\nTap one:';
+  const header = "📊 Live Markets\n\nTap a market to bet:';
   if (edit) { await ctx.editMessageText(header, { reply_markup: { inline_keyboard: rows } }); }
   else { await ctx.reply(header, { reply_markup: { inline_keyboard: rows } }); }
 }
@@ -281,8 +281,8 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
       msg += `\n\n⚠️ This market is not open for betting.`;
     }
     keyboard.inline_keyboard.push([
-        { text: '🧠 Intelligence', callback_data: `intel_` },
-        { text: '⚖️ Dispute', callback_data: `dispute_` },
+        { text: '🧠 Intelligence', callback_data: `intel_${marketId}` },
+        { text: '⚖️ Dispute', callback_data: `dispute_${marketId}` },
       ]);
       keyboard.inline_keyboard.push([{ text: '⬅️ Back to Markets', callback_data: 'browse_markets' }]);
 
