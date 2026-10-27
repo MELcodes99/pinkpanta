@@ -205,7 +205,7 @@ async function showMarkets(ctx, edit = false) {
   }
 
   const rows = markets.map((m) => {
-    const q = m.question.length > 42 ? m.question.slice(0, 41) + '…' : m.question;
+    const q = (m.question || m.title || m.description || m.marketId || "").slice(0, 42);
     const tag = m.bettable
       ? (m.yesPrice != null ? ` — YES ${Math.round(parseFloat(m.yesPrice) * 100)}%` : '')
       : ' 🔗';
@@ -237,7 +237,7 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
     catch (e) { await ctx.reply('Could not load that market. Try again in a moment.'); return; }
 
     const question = (m.question || m.title || '').trim();
-    if (!question) {
+    if (false) {
       await ctx.reply('This market has no data available right now. Try another one.',
         { reply_markup: { inline_keyboard: [[{ text: '⬅️ Back to Markets', callback_data: 'browse_markets' }]] } });
       return;
