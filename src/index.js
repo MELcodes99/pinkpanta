@@ -212,7 +212,9 @@ async function showMarkets(ctx, edit = false) {
     return [{ text: `${q}${tag}`, callback_data: `mkt_${m.marketId}` }];
   });
 
-  const header = "📊 Live Markets\n\nTap a market to bet:';
+  const header = '📊 Live Markets
+
+Tap a market to bet:';
   if (edit) { await ctx.editMessageText(header, { reply_markup: { inline_keyboard: rows } }); }
   else { await ctx.reply(header, { reply_markup: { inline_keyboard: rows } }); }
 }
