@@ -280,7 +280,11 @@ bot.action(/^mkt_(.+)$/, async (ctx) => {
     } else {
       msg += `\n\n⚠️ This market is not open for betting.`;
     }
-    keyboard.inline_keyboard.push([{ text: '⬅️ Back to Markets', callback_data: 'browse_markets' }]);
+    keyboard.inline_keyboard.push([
+        { text: '🧠 Intelligence', callback_data: `intel_` },
+        { text: '⚖️ Dispute', callback_data: `dispute_` },
+      ]);
+      keyboard.inline_keyboard.push([{ text: '⬅️ Back to Markets', callback_data: 'browse_markets' }]);
 
     await ctx.editMessageText(msg, { reply_markup: keyboard });
   } catch (err) {
