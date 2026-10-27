@@ -63,11 +63,14 @@ async function getLiveMarkets(limit = 20) {
     ]);
     const primaryItems = (primary.items || []).map(m => ({ ...m, bettable: true }));
     const secondaryItems = (secondary.items || []).map(m => ({ ...m, bettable: false }));
-    const all = [...primaryItems, ...secondaryItems].slice(0, limit);
+    const all = [...primaryItems, ...secondaryItems];
     const detailed = await Promise.all(
       all.map(m => getMarket(m.marketId).catch(() => m))
     );
-    return detailed.map((m, i) => ({ ...m, bettable: all[i].bettable }));
+    return detailed
+      .map((m, i) => ({ ...m, bettable: all[i].bettable }))
+      .filter(m => m.status !== 'resolved' && m.phase !== 'resolved' && m.phase !== 'post_resolution')
+      .slice(0, limit);
   } catch (e) {
     return [];
   }

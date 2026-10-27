@@ -23,6 +23,7 @@ const {
   getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, getAccountCreates, getPositions, SITE_BASE,
   getOrderBook, buildListShares, buildRestBid, buildFillOrder, buildCancelOrder,
   buildDispute, submitDispute, getDisputeStatus,
+  getMarketIntelligence,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
