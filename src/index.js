@@ -1140,7 +1140,7 @@ bot.on('text', async (ctx) => {
             ]}}
           );
         } catch (err) {
-          const code = err.response?.data?.code || err.message;
+          const code = err.response?.status || err.response?.data?.code || err.message;
           await ctx.reply(`❌ Dispute failed: ${code}`);
         }
         return;
@@ -1614,8 +1614,8 @@ bot.action(/^intel_(.+)$/, async (ctx) => {
     try {
       intel = await getMarketIntelligence(marketId);
     } catch (err) {
-      const code = err.response?.data?.code || err.message;
-      const friendlyMsg = code === 404
+      const code = err.response?.status || err.response?.data?.code || err.message;
+      const friendlyMsg = (code === 404 || code === '404')
         ? '🧠 Intelligence\n\nNo analysis available for this market yet. Check back after trading activity begins.'
         : `❌ Could not load intelligence: ${code}`;
       await ctx.editMessageText(friendlyMsg, {
