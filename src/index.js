@@ -931,15 +931,24 @@ bot.action('my_bets_created', async (ctx) => {
     const userId = ctx.from.id;
     const user = await getUser(userId);
 
-    let creates = [];
-    try {
-      const all = await getAccountCreates(user.wallet_address);
-      creates = Array.isArray(all) ? all : [];
-    } catch (_) {}
     const dbMarkets = await getUserMarkets(userId);
     const dbTitleMap = {};
     dbMarkets.forEach(m => { dbTitleMap[m.market_id] = m.title; });
-    const markets = creates.length ? creates : dbMarkets.map(m => ({ eventPda: m.market_id, title: m.title }));
+
+    // Fetch all markets and filter by creatorAddress from full details
+    let apiCreated = [];
+    if (user?.wallet_address) {
+      try {
+        const all = await getLiveMarketsAll();
+        const detailed = await Promise.all(all.map(m => getCachedMarket(m.marketId).catch(() => m)));
+        apiCreated = detailed.filter(m => m.creatorAddress === user.wallet_address)
+          .map(m => ({ eventPda: m.marketId, title: m.question || m.title }));
+      } catch (_) {}
+    }
+
+    const dbMapped = dbMarkets.map(m => ({ eventPda: m.market_id, title: m.title }));
+    const allIds = new Set(apiCreated.map(m => m.eventPda));
+    const markets = [...apiCreated, ...dbMapped.filter(m => !allIds.has(m.eventPda))];
 
     let msg = '🏛️ Markets You Created\n\n';
     if (!markets.length) {
