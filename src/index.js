@@ -23,7 +23,7 @@ const {
   getLiveMarkets, getCachedMarket, checkMarketResult, uploadMarketImage, buildWinClaim, buildCreatorFeeClaim, getAccountCreates, getPositions, SITE_BASE,
   getOrderBook, buildListShares, buildRestBid, buildFillOrder, buildCancelOrder,
   buildDispute, submitDispute, getDisputeStatus,
-  getMarketIntelligence,
+  getMarketIntelligence, getSecondaryListings,
 } = require('./panta/services');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -789,6 +789,37 @@ bot.action('my_bets_participated', async (ctx) => {
       try { const pos = await getPositions(activeWallet); onChainPositions = Array.isArray(pos) ? pos : (pos?.items || pos?.positions || []); } catch (_) {}
     }
 
+
+    // Fetch open secondary listings for this wallet
+    let secondaryListings = [];
+    if (activeWallet) {
+      try {
+        const liveMarkets = await getLiveMarkets(20);
+        const secMarkets = liveMarkets.filter(m => m.phase === 'secondary' || m.status === 'secondary');
+        const listingResults = await Promise.all(
+          secMarkets.map(async m => ({ market: m, items: await getSecondaryListings(m.marketId) }))
+        );
+        for (const { market, items } of listingResults) {
+          for (const item of items) {
+            if (item.wallet === activeWallet) {
+              secondaryListings.push({
+                _secondary: true,
+                market_id: market.marketId,
+                market_title: market.question || market.title || market.marketId,
+                side: item.side?.toLowerCase(),
+                amount_usdc: parseFloat(item.price || 0) * parseFloat(item.shares || 0),
+                shares: item.shares || '?',
+                price: item.price,
+                filledShares: item.filledShares || '0',
+                listingId: item.listingId,
+                status: 'open bid',
+              });
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
     const dbMarketSideKeys = new Set(dbBets.map(b => `${b.market_id}:${b.side}`));
     const onChainRows = onChainPositions
       .filter(p => {
@@ -808,7 +839,7 @@ bot.action('my_bets_participated', async (ctx) => {
         market_end_time: p.endTime || p.resolutionTime || null,
       }));
 
-    const allBets = [...dbBets, ...onChainRows];
+    const allBets = [...dbBets, ...onChainRows, ...secondaryListings];
 
     const total = allBets.length;
     const volume = allBets.reduce((sum, b) => sum + parseFloat(b.amount_usdc || 0), 0);
@@ -844,7 +875,9 @@ bot.action('my_bets_participated', async (ctx) => {
         msg += `${statusEmoji} ${title}\n`;
         msg += `   ${side} • ${parseFloat(b.amount_usdc || 0).toFixed(2)} USDC • ${b.shares || '?'} shares\n`;
         if (dateStr) msg += `   ⏰ Ends: ${dateStr}\n`;
-        if (b._onChain) {
+        if (b._secondary) {
+          msg += `   📋 Open bid • ${b.filledShares || '0'}/${b.shares} shares filled\n`;
+        } else if (b._onChain) {
           msg += `   Status: ${b.status === 'on-chain' ? 'active ⛓️' : b.status}\n`;
         } else {
           msg += `   Status: ${b.status === 'claimed' ? 'claimed ✅' : b.status}\n`;

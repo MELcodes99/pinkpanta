@@ -227,6 +227,14 @@ async function getMarketIntelligence(marketId) {
   return response.data;
 }
 
+
+async function getSecondaryListings(marketId, limit = 50) {
+  try {
+    const response = await pantaClient.get('/secondary/listings/', { params: { marketId, limit } });
+    return response.data.items || [];
+  } catch (e) { return []; }
+}
+
 module.exports = {
   SITE_BASE, getAccountInfo, listMarketsByStatus, getCategories, getMarket,
   getPrimaryMarkets, getSecondaryMarkets, getLiveMarkets, getCachedMarket,
@@ -235,5 +243,5 @@ module.exports = {
   registerMarket, quotePrimaryBuy, buildPrimaryBuy, submitPrimaryBuy, verifyPrimaryBuy,
   getOrderBook, buildListShares, buildRestBid, buildFillOrder, buildCancelOrder,
   buildDispute, submitDispute, getDisputeStatus,
-  getMarketIntelligence,
+  getMarketIntelligence, getSecondaryListings,
 };
