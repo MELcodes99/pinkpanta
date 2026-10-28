@@ -1276,7 +1276,12 @@ bot.on('text', async (ctx) => {
             [{ text: '❌ Cancel', callback_data: 'cancel_bet' }],
           ]}});
       } catch (err) {
-        await ctx.reply(`❌ Could not get quote:\n${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
+        const status = err.response?.status;
+        if (status === 404) {
+          await ctx.reply('⚠️ Betting is currently closed for this market.\n\nThe primary phase has ended. Use the secondary order book to trade shares.');
+        } else {
+          await ctx.reply(`❌ Could not get quote: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
+        }
         delete st.bet;
       }
       return;
