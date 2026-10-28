@@ -1180,7 +1180,7 @@ bot.on('text', async (ctx) => {
             `✅ Shares Listed!\n\n${side.toUpperCase()} x${shares} @ $${price}\nListing ID: ${built.listingId}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
               [{ text: '📖 Order Book', callback_data: `ob_${marketId}` }],
-              [{ text: '❌ Cancel Listing', callback_data: `cancel_order_${marketId}_${built.listingId}` }],
+              [{ text: '❌ Cancel Listing', callback_data: 'cancel_last_order' }],
             ]}}
           );
         } catch (err) {
@@ -1219,11 +1219,14 @@ bot.on('text', async (ctx) => {
           await ctx.reply('⏳ Placing bid...');
           const built = await buildRestBid({ wallet: user.wallet_address, marketId, side, price, shares: String(shares), userId: String(userId) });
           const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+          const st2 = userState[userId] || (userState[userId] = {});
+          st2.lastListingId = built.listingId;
+          st2.lastListingMarket = marketId;
           await ctx.reply(
             `✅ Bid Placed!\n\n${side.toUpperCase()} x${shares} @ $${price}\nMax Cost: $${built.maxCostUsdc} USDC\nListing ID: ${built.listingId}\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
               [{ text: '📖 Order Book', callback_data: `ob_${marketId}` }],
-              [{ text: '❌ Cancel Bid', callback_data: `cancel_order_${marketId}_${built.listingId}` }],
+              [{ text: '❌ Cancel Bid', callback_data: 'cancel_last_order' }],
             ]}}
           );
         } catch (err) {
@@ -1472,6 +1475,25 @@ bot.action(/^fill_(.+?)_(.+)$/, async (ctx) => {
   } catch (err) {
     await ctx.reply(`❌ Fill failed: ${err.response?.data?.code || err.message}`);
   }
+});
+
+bot.action('cancel_last_order', async (ctx) => {
+  try {
+    if (!(await requirePrivateCb(ctx))) return;
+    await ctx.answerCbQuery();
+    const st = userState[ctx.from.id] || {};
+    const marketId = st.lastListingMarket;
+    const listingId = st.lastListingId;
+    if (!marketId || !listingId) { await ctx.reply('No recent order found.'); return; }
+    const user = await getUser(ctx.from.id);
+    const keypair = decryptKeypair(user.encrypted_keypair);
+    await ctx.reply('⏳ Cancelling order...');
+    const built = await buildCancelOrder({ wallet: user.wallet_address, marketId, listingId });
+    const sig = await signAndSendInstructions(built.instructions, built.recentBlockhash, keypair);
+    delete st.lastListingId; delete st.lastListingMarket;
+    await ctx.reply(`✅ Order cancelled\n\n[View on Solscan](https://solscan.io/tx/${sig})`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '📖 Order Book', callback_data: `ob_${marketId}` }]] }});
+  } catch (err) { await ctx.reply(`❌ Cancel failed: ${err.message}`); }
 });
 
 bot.action(/^cancel_order_(.+?)_(.+)$/, async (ctx) => {
