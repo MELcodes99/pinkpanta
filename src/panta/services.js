@@ -57,19 +57,19 @@ async function getSecondaryMarkets() {
 
 async function getLiveMarkets(limit = 20) {
   try {
-    const [primary, secondary] = await Promise.all([
-      getPrimaryMarkets().catch(() => ({ items: [] })),
-      getSecondaryMarkets().catch(() => ({ items: [] })),
-    ]);
-    const primaryItems = (primary.items || []).map(m => ({ ...m, bettable: true }));
-    const secondaryItems = (secondary.items || []).map(m => ({ ...m, bettable: false }));
-    const all = [...primaryItems, ...secondaryItems];
+    const response = await pantaClient.get('/markets/?limit=200');
+    const items = response.data.items || [];
+    const active = items.filter(m =>
+      m.status !== 'resolved' &&
+      m.phase !== 'resolved' &&
+      m.phase !== 'post_resolution'
+    );
     const detailed = await Promise.all(
-      all.map(m => getMarket(m.marketId).catch(() => m))
+      active.map(m => getMarket(m.marketId).catch(() => m))
     );
     return detailed
-      .map((m, i) => ({ ...m, bettable: all[i].bettable }))
       .filter(m => m.status !== 'resolved' && m.phase !== 'resolved' && m.phase !== 'post_resolution')
+      .map(m => ({ ...m, bettable: m.phase === 'primary' || m.status === 'primary' }))
       .slice(0, limit);
   } catch (e) {
     return [];
