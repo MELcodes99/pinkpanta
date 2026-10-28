@@ -786,7 +786,7 @@ bot.action('my_bets_participated', async (ctx) => {
 
     let onChainPositions = [];
     if (activeWallet) {
-      try { onChainPositions = await getPositions(activeWallet) || []; } catch (_) {}
+      try { const pos = await getPositions(activeWallet); onChainPositions = Array.isArray(pos) ? pos : (pos?.items || pos?.positions || []); } catch (_) {}
     }
 
     const dbMarketSideKeys = new Set(dbBets.map(b => `${b.market_id}:${b.side}`));
