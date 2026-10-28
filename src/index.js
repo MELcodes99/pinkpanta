@@ -933,8 +933,8 @@ bot.action('my_bets_created', async (ctx) => {
 
     let creates = [];
     try {
-      const all = await getAccountCreates();
-      creates = all.filter(m => m.wallet === user.wallet_address);
+      const all = await getAccountCreates(user.wallet_address);
+      creates = Array.isArray(all) ? all : [];
     } catch (_) {}
     const dbMarkets = await getUserMarkets(userId);
     const dbTitleMap = {};
