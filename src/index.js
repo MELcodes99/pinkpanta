@@ -1606,7 +1606,10 @@ bot.action(/^intel_(.+)$/, async (ctx) => {
       intel = await getMarketIntelligence(marketId);
     } catch (err) {
       const code = err.response?.data?.code || err.message;
-      await ctx.editMessageText(`❌ Could not load intelligence: ${code}`, {
+      const friendlyMsg = code === 404
+        ? '🧠 Intelligence\n\nNo analysis available for this market yet. Check back after trading activity begins.'
+        : `❌ Could not load intelligence: ${code}`;
+      await ctx.editMessageText(friendlyMsg, {
         reply_markup: { inline_keyboard: [[{ text: '⬅️ Back', callback_data: `mkt_${marketId}` }]] },
       });
       return;
